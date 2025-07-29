@@ -66,6 +66,6 @@ class Downloader:
         url = (
             "https://data.iledefrance-mobilites.fr/api/explore/v2.1/"
             "catalog/datasets/emplacement-des-gares-idf/exports/"
-            "parquet?lang=fr&timezone=Asia%2FBeirut"
+            "parquet?lang=eng&timezone=Africa%2FCairo"
         )
         self._download_file_and_log_it(url, "emplacement-des-gares-idf.parquet")
