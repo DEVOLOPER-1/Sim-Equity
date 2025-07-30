@@ -10,10 +10,12 @@ dependencies = [
     "mesa>=3.2.0",
     "mesa-geo>=0.9.1",
     "notebook>=7.4.3",
+    "osmium>=4.0.2",
     "pandas>=2.3.0",
     "polars>=1.31.0",
     "pyarrow",
     "pynsee>=0.2.3",
+    "pyrosm>=0.6.2",
     "scikit-learn>=1.7.0",
     "ydata-profiling>=4.16.1",
 ]
