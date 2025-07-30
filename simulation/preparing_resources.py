@@ -1,8 +1,11 @@
+import logging
+
 import requests
 import datetime
 from alive_progress import alive_bar
 from pathlib import Path
 from zipfile import ZipFile
+import osmnx as ox
 import os
 
 
@@ -12,7 +15,7 @@ class Logger:
         # ensure the parent directory exists
         self.FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    def log_it(self, file_name: str):
+    def log_it(self, file_name: str)->None:
         timestamp = datetime.datetime.now().isoformat(timespec="seconds")
         entry = (
             f"FILE NAME: {file_name} | "
@@ -115,3 +118,9 @@ class IleDeFranceMobilityDataCollector(Downloader):
     def ile_de_france_open_street_map(self):
         url = "https://download.geofabrik.de/europe/france/ile-de-france-latest.osm.pbf"
         self.download_file_and_log_it(url, "ile-de-france-latest.osm.pbf")
+
+    def ile_de_france_open_street_map_(self):
+        place_name = "Île-de-France, France"
+        G_drive = ox.graph_from_place(place_name, network_type='all', simplify=True, retain_all=False)
+        ox.save_graphml(G_drive, filepath='./simulation/data/osmnx_layers/IDF_network.graphml')
+        Logger.log_it("IDF_network.graphml")

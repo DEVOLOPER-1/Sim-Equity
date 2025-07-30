@@ -5,12 +5,54 @@ from simulation.preparing_resources import IleDeFranceMobilityDataCollector
 
 # IleDeFranceMobilityDataCollector().ile_de_france_open_street_map()
 
-from pyrosm import OSM
-
-osm = OSM("simulation/data/chunk_2.osm.pbf")
-buildings = osm.get_network()
+# from pyrosm import OSM
+# import matplotlib.pyplot as plt
+# osm = OSM("simulation/data/chunk_4.osm.pbf")
+# network = osm.get_network("driving")
+# plt.figure(dpi=300)
+# ax = network.plot(figsize=(10, 10), linewidth=0.5, edgecolor="gray")
+# plt.title("Pyrosm Network Plot")
+# plt.show()
+# del network
+# osm = OSM("simulation/data/chunk_4.osm.pbf")
+# buildings = osm.get_network()
 # buildings.plot()
-print(buildings)
+# print(buildings)
+
+# preprocess_maps.py
+import osmnx as ox
+# G_ = ox.io.load_graphml("./simulation/data/osmnx_layers/IDF_network.graphml")
+# G_.nodes()
+# G_
+# # Plot the graph
+# fig, ax = ox.plot_graph(G_)
+
+# You can customize the plot with various parameters:
+# fig, ax = ox.plot_graph(G_, node_color='r', node_size=10, edge_linewidth=0.5, edge_color='gray', bgcolor='w')
+# print("Starting one-time map pre-processing...")
+place_name = "Île-de-France, France"
+#
+# --- Process Drivable Roads ---
+print("Extracting drivable network...")
+G_drive = ox.graph_from_place(place_name, network_type='drive', simplify=True, retain_all=True)
+ox.save_graphml(G_drive, filepath='./simulation/data/osmnx_layers/IDF_drive_network.graphml')
+print("Saved drivable network to disk.")
+
+# --- Process Walkable Paths ---
+print("Extracting walkable network...")
+G_walk = ox.graph_from_place(place_name, network_type='walk', simplify=True, retain_all=True)
+ox.save_graphml(G_walk, filepath='./simulation/data/osmnx_layers/IDF_walk_network.graphml')
+print("Saved walkable network to disk.")
+
+
+print("Extracting walkable network...")
+G_bike = ox.graph_from_place(place_name, network_type='bike', simplify=True, retain_all=True)
+ox.save_graphml(G_bike, filepath='./simulation/data/osmnx_layers/IDF_bike_network.graphml')
+print("Saved walkable network to disk.")
+
+
+print("All maps pre-processed and saved successfully!")
+
 """
 osmium extract   --config extracts.json   --strategy complete_ways --overwrite   ile-de-france-latest.osm.pbf 
 
