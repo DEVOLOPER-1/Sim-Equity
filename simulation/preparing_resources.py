@@ -120,7 +120,39 @@ class IleDeFranceMobilityDataCollector(Downloader):
         self.download_file_and_log_it(url, "ile-de-france-latest.osm.pbf")
 
     def ile_de_france_open_street_map_(self):
+        """Extract and save OSM network data for Île-de-France region."""
         place_name = "Île-de-France, France"
-        G_drive = ox.graph_from_place(place_name, network_type='all', simplify=True, retain_all=False)
-        ox.save_graphml(G_drive, filepath='./simulation/data/osmnx_layers/IDF_network.graphml')
-        Logger.log_it("IDF_network.graphml")
+        base_path = './simulation/data/osmnx_layers'
+
+        # Ensure output directory exists
+        Path(base_path).mkdir(parents=True, exist_ok=True)
+
+        # Network configurations: (network_type, filename, description)
+        networks = [
+            ('drive', 'IDF_drive_network.graphml', 'drivable'),
+            ('walk', 'IDF_walk_network.graphml', 'walkable'),
+            ('bike', 'IDF_bike_network.graphml', 'bike')
+        ]
+
+        for network_type, filename, description in networks:
+            self._extract_and_save_network(place_name, network_type, filename, description, base_path)
+
+        print("All maps pre-processed and saved successfully!")
+
+    def _extract_and_save_network(self, place_name: str, network_type: str, filename: str,
+                                  description: str, base_path: str):
+        """Extract and save a specific network type."""
+        print(f"Extracting {description} network...")
+
+        graph = ox.graph_from_place(
+            place_name,
+            network_type=network_type,
+            simplify=True,
+            retain_all=True
+        )
+
+        filepath = f"{base_path}/{filename}"
+        ox.save_graphml(graph, filepath=filepath)
+        self.logger.log_it(filename)
+
+        print(f"Saved {description} network to disk.")

@@ -30,28 +30,8 @@ import osmnx as ox
 # You can customize the plot with various parameters:
 # fig, ax = ox.plot_graph(G_, node_color='r', node_size=10, edge_linewidth=0.5, edge_color='gray', bgcolor='w')
 # print("Starting one-time map pre-processing...")
-place_name = "Île-de-France, France"
 #
-# --- Process Drivable Roads ---
-print("Extracting drivable network...")
-G_drive = ox.graph_from_place(place_name, network_type='drive', simplify=True, retain_all=True)
-ox.save_graphml(G_drive, filepath='./simulation/data/osmnx_layers/IDF_drive_network.graphml')
-print("Saved drivable network to disk.")
 
-# --- Process Walkable Paths ---
-print("Extracting walkable network...")
-G_walk = ox.graph_from_place(place_name, network_type='walk', simplify=True, retain_all=True)
-ox.save_graphml(G_walk, filepath='./simulation/data/osmnx_layers/IDF_walk_network.graphml')
-print("Saved walkable network to disk.")
-
-
-print("Extracting walkable network...")
-G_bike = ox.graph_from_place(place_name, network_type='bike', simplify=True, retain_all=True)
-ox.save_graphml(G_bike, filepath='./simulation/data/osmnx_layers/IDF_bike_network.graphml')
-print("Saved walkable network to disk.")
-
-
-print("All maps pre-processed and saved successfully!")
 
 """
 osmium extract   --config extracts.json   --strategy complete_ways --overwrite   ile-de-france-latest.osm.pbf 
@@ -128,3 +108,5 @@ split.apply_file("simulation/data/ile-de-france-latest.osm.pbf", locations=True)
 for w in handlers: w.close()
 
 """
+
+
