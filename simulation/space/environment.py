@@ -1,9 +1,12 @@
-import math
 import datetime
-import  numpy as np
+import math
+from typing import List, Tuple
+import gc
 import matplotlib.pyplot as plt
-from typing import Tuple, List
-from haversine.haversine import haversine , Unit
+import numpy as np
+import polars as pl
+from haversine.haversine import haversine, Unit
+
 EARTH_RADIUS_KM = 6371.0088
 EARTH_RADIUS_M = EARTH_RADIUS_KM * 1000.0
 
@@ -26,6 +29,7 @@ class EnvironmentInitializer:
         self.center = center
         self.radius_km = radius
         self.date_time = datetime.datetime.strptime(time, "%m:%d:%H:%M")
+        self.select_agents_id = []
 
     # ----------------------------
     # Core geodesic helpers
@@ -36,7 +40,8 @@ class EnvironmentInitializer:
         return ((lon_deg + 180.0) % 360.0) - 180.0
 
     @staticmethod
-    def destination_point_spherical(lat_deg: float, lon_deg: float, bearing_rad: float, distance_km: float) -> Tuple[float, float]:
+    def destination_point_spherical(lat_deg: float, lon_deg: float, bearing_rad: float, distance_km: float) -> Tuple[
+        float, float]:
         """
         Spherical forward (direct) problem.
 
@@ -66,7 +71,8 @@ class EnvironmentInitializer:
     # ----------------------------
     # Public API: polygon generation
     # ----------------------------
-    def calculate_evacuation_area(self, radius_km: float = None, center: Tuple[float, float] = None, points: int = 360) -> List[Tuple[float, float]]:
+    def calculate_evacuation_area(self, radius_km: float = None, center: Tuple[float, float] = None,
+                                  points: int = 360) -> List[Tuple[float, float]]:
         """
         Build a polygon (list of lat, lon in degrees) approximating a circle on the sphere.
 
@@ -82,7 +88,7 @@ class EnvironmentInitializer:
         lat0, lon0 = center
         polygon: List[Tuple[float, float]] = []
         for k in range(points):
-            bearing_rad = math.radians(k * 360.0 / points) # adds tolerance if points aren't 360
+            bearing_rad = math.radians(k * 360.0 / points)  # adds tolerance if points aren't 360
             lat2_deg, lon2_deg = self.destination_point_spherical(lat0, lon0, bearing_rad, radius_km)
             polygon.append((lat2_deg, lon2_deg))
         # Close polygon (optional)
@@ -110,13 +116,14 @@ class EnvironmentInitializer:
     # Haversine distance (meters)
     # ----------------------------
     @staticmethod
-    def haversine_distance_m(point1:tuple[float,float] , point2:tuple[float,float]) -> float:
-            return haversine(point1 , point2 , unit=Unit.METERS , check=True , normalize=True)
+    def haversine_distance_m(point1: tuple[float, float], point2: tuple[float, float]) -> float:
+        return haversine(point1, point2, unit=Unit.METERS, check=True, normalize=True)
 
     # ----------------------------
     # Plot helpers
     # ----------------------------
-    def latlon_to_local_xy(self, lat_deg: float, lon_deg: float, center_lat_deg: float, center_lon_deg: float) -> Tuple[float, float]:
+    def latlon_to_local_xy(self, lat_deg: float, lon_deg: float, center_lat_deg: float, center_lon_deg: float) -> Tuple[
+        float, float]:
         """
         Convert lat/lon differences to local tangential plane meters (east, north),
         using the center as origin. Good for small areas (up to a few 10s km).
@@ -235,3 +242,55 @@ class EnvironmentInitializer:
 
         plt.tight_layout()
         plt.show()
+
+    @property
+    def __reading_trips_df_and_gathering_their_data(self)->pl.DataFrame:
+
+        target_dt: datetime.datetime = self.date_time
+        target_month = target_dt.month
+        target_day = target_dt.day
+
+
+        gps_df = pl.read_csv("../data/trips_dataset.csv")
+
+        gps_df = gps_df.select(
+            pl.col("Date_EMG").str.to_date(format="%Y-%m-%d", exact=False, strict=False)
+        )
+
+        gps_df = gps_df.filter(
+            (pl.col("Date_EMG").dt.day() == target_day) & (pl.col("Date_EMG").dt.month() == target_month))
+
+        gps_df = gps_df.with_columns(
+            pl.datetime(pl.col("Date_O").dt.year() , pl.col("Date_O").dt.month() , pl.col("Date_O").dt.day() , pl.col("Time_O").dt.hour() ,pl.col("Time_O").dt.minute() ,pl.col("Time_O").dt.second() ).alias("start_datetime") ,
+
+            pl.datetime(pl.col("Date_D").dt.year(), pl.col("Date_D").dt.month(), pl.col("Date_D").dt.day(),
+                        pl.col("Time_D").dt.hour(), pl.col("Time_D").dt.minute(), pl.col("Time_D").dt.second()).alias(
+                "end_datetime")
+
+        )
+        gps_df = gps_df.drop("Time_D" , "Date_D" , "Time_O" , "Date_O")
+
+        gps_df = gps_df.select(["Main_Mode" , "Mode_1" , "Mode_2" , "Mode_3", "Mode_4" , "Mode_5" , "Purpose_O" , "Purpose_D","end_datetime" ,"start_datetime" ,"ID"])
+
+        gc.collect()
+
+        return gps_df
+
+
+    def read_and_parse_their_csvs(self):
+        max_time = self.date_time + datetime.timedelta(hours=1)
+        min_time = self.date_time - datetime.timedelta(hours=1)
+
+        df = self.__reading_trips_df_and_gathering_their_data
+
+        chosen = df.to_dicts()
+
+        del  df
+
+        gc.collect()
+
+        for c_ in chosen:
+            df_c_  = pl.read_csv(f"../data/gps_dataset/{c_.get('ID' , None)}.csv")
+            df_c_.filter()
+
+        #TODO: The logic in which i will read each records df and choose which lat & lon to start from by my agent

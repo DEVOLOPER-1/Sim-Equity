@@ -1,5 +1,3 @@
-from simulation.preparing_resources import IleDeFranceMobilityDataCollector
-
 # log = Logger("data/logs")
 # log.log_it("apple.com.csv")
 
@@ -20,7 +18,6 @@ from simulation.preparing_resources import IleDeFranceMobilityDataCollector
 # print(buildings)
 
 # preprocess_maps.py
-import osmnx as ox
 # G_ = ox.io.load_graphml("./simulation/data/osmnx_layers/IDF_network.graphml")
 # G_.nodes()
 # G_
@@ -110,3 +107,9 @@ for w in handlers: w.close()
 """
 
 
+from simulation.space.environment import EnvironmentInitializer
+
+env = EnvironmentInitializer((48.8575, 2.3514) , 50 , "08:01:18:34")
+env.plot_evacuation_area()
+
+print(env.haversine_distance_m((48.8575, 2.3514), (48.2, 2.3514)))
