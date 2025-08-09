@@ -1,7 +1,7 @@
 import datetime
 import gc
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 import numpy as np
 import polars as pl
@@ -46,12 +46,13 @@ class AgentsGatherer:
         )
 
         print(gps_df.shape)
+        """
         gps_df = gps_df.filter(
             (pl.col("Date_EMG_parsed").dt.month() == target_month)
             & (pl.col("Date_EMG_parsed").dt.day() == target_day)
         )
-        print(gps_df.shape)
-        """
+        # print(gps_df.shape)
+
         gps_df = gps_df.with_columns(
             pl.concat_str(
                 [
@@ -95,7 +96,7 @@ class AgentsGatherer:
         self,
         output_csv_path: str = "mesa_initializers.csv",
         hours_window: float = 6,
-        fallback_to_full_trace: bool = False,
+        fallback_to_full_trace: bool = True,
         verbose: bool = True,
     ):
         output_csv_path = self.__data_path / output_csv_path
@@ -106,23 +107,13 @@ class AgentsGatherer:
         if verbose:
             print("Total trips rows:", trips_df.shape[0])
 
-        # FILTER: trip overlaps the window
-        trips_filtered = trips_df.filter(
-            (pl.col("start_datetime") <= pl.lit(max_time))
-            & (pl.col("end_datetime") >= pl.lit(min_time))
-        )
-
-        if verbose:
-            print("Trips overlapping window:", trips_filtered.shape[0])
-
-        chosen_trips = trips_filtered.select(
+        chosen_trips = trips_df.select(
             ["ID", "Main_Mode", "start_datetime", "end_datetime"]
         ).to_dicts()
-
-        del trips_df, trips_filtered
+        del trips_df
         gc.collect()
 
-        summaries = []
+        summaries: set[dict[str, Any]] = set()
         for trip in chosen_trips:
             agent_id = trip.get("ID")
             main_mode = trip.get("Main_Mode")
@@ -195,6 +186,7 @@ class AgentsGatherer:
                 if d < min_d:
                     min_d = d
                     best_idx = idx
+                    # Remove the main_mode assignment from here
 
             if best_idx is None:
                 continue
@@ -203,11 +195,20 @@ class AgentsGatherer:
             start_lat = lats[best_idx]
             start_lon = lons[best_idx]
             start_time = times[best_idx]
+
+            # Fix the mode inference logic
             inferred_mode = None
-            for trip in chosen_trips:
-                if trip.get("start_datetime") <= start_time <= trip.get("end_datetime"):
-                    inferred_mode = trip.get("Main_Mode")
+            for current_trip in chosen_trips:  # Use different variable name
+                if (
+                    current_trip.get("start_datetime")
+                    <= start_time
+                    <= current_trip.get("end_datetime")
+                ):
+                    inferred_mode = current_trip.get("Main_Mode")
                     break
+
+            # Keep the original trip's main_mode (already set at loop start)
+            # main_mode is already correctly set from: main_mode = trip.get("Main_Mode")
 
             summary = {
                 "ID": agent_id,
@@ -223,7 +224,7 @@ class AgentsGatherer:
                 "stationary_fraction": stationary_fraction,
                 "used_fallback_full_trace": bool(df_win.is_empty()),
             }
-            summaries.append(summary)
+            summaries.add(summary)
 
         if summaries:
             out_df = pl.DataFrame(summaries)
