@@ -1,24 +1,24 @@
-# log = Logger("data/logs")
+# log = Logger("maps_data/logs")
 # log.log_it("apple.com.csv")
 
 # IleDeFranceMobilityDataCollector().ile_de_france_open_street_map()
 
 # from pyrosm import OSM
 # import matplotlib.pyplot as plt
-# osm = OSM("simulation/data/chunk_4.osm.pbf")
+# osm = OSM("simulation/maps_data/chunk_4.osm.pbf")
 # network = osm.get_network("driving")
 # plt.figure(dpi=300)
 # ax = network.plot(figsize=(10, 10), linewidth=0.5, edgecolor="gray")
 # plt.title("Pyrosm Network Plot")
 # plt.show()
 # del network
-# osm = OSM("simulation/data/chunk_4.osm.pbf")
+# osm = OSM("simulation/maps_data/chunk_4.osm.pbf")
 # buildings = osm.get_network()
 # buildings.plot()
 # print(buildings)
 
 # preprocess_maps.py
-# G_ = ox.io.load_graphml("./simulation/data/osmnx_layers/IDF_network.graphml")
+# G_ = ox.io.load_graphml("./simulation/maps_data/osmnx_layers/IDF_network.graphml")
 # G_.nodes()
 # G_
 # # Plot the graph
@@ -31,7 +31,7 @@
 
 
 """
-osmium extract   --config extracts.json   --strategy complete_ways --overwrite   ile-de-france-latest.osm.pbf 
+osmium extract   --config extracts.json   --strategy complete_ways --overwrite   ile-de-france-latest.osm.pbf
 
 """
 # import json
@@ -54,7 +54,7 @@ osmium extract   --config extracts.json   --strategy complete_ways --overwrite  
 #             "bbox": [left, bottom, right, top]
 #         })
 #
-# with open("./simulation/data/extracts.json", "w") as f:
+# with open("./simulation/maps_data/extracts.json", "w") as f:
 #     json.dump(config, f, indent=2)
 
 
@@ -70,7 +70,7 @@ class CounterHandler(osmium.SimpleHandler):
     def relation(self, r): self.count += 1
 
 cnt = CounterHandler()
-cnt.apply_file("simulation/data/ile-de-france-latest.osm.pbf", locations=False)
+cnt.apply_file("simulation/maps_data/ile-de-france-latest.osm.pbf", locations=False)
 total = cnt.count
 N=4
 per_chunk = total // N
@@ -101,7 +101,7 @@ class SplitHandler(osmium.SimpleHandler):
             self.current = 0
 
 split = SplitHandler()
-split.apply_file("simulation/data/ile-de-france-latest.osm.pbf", locations=True)
+split.apply_file("simulation/maps_data/ile-de-france-latest.osm.pbf", locations=True)
 for w in handlers: w.close()
 
 """
@@ -109,7 +109,7 @@ for w in handlers: w.close()
 
 from simulation.space.environment import EnvironmentInitializer
 
-env = EnvironmentInitializer((48.8575, 2.3514) , 50 , "08:01:18:34")
+env = EnvironmentInitializer((48.8575, 2.3514), 50, "08:01:18:34")
 env.plot_evacuation_area()
 
 print(env.haversine_distance_m((48.8575, 2.3514), (48.2, 2.3514)))

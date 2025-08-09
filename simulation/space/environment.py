@@ -1,11 +1,8 @@
-import datetime
 import math
 from typing import List, Tuple
-import gc
+
 import matplotlib.pyplot as plt
 import numpy as np
-import polars as pl
-from haversine.haversine import haversine, Unit
 
 EARTH_RADIUS_KM = 6371.0088
 EARTH_RADIUS_M = EARTH_RADIUS_KM * 1000.0
@@ -25,10 +22,9 @@ class EnvironmentInitializer:
         The simulation start time in format 'month:day:hour:minute' (e.g., '08:05:14:30')
     """
 
-    def __init__(self, center: Tuple[float, float], radius: float, time: str) -> None:
+    def __init__(self, center: Tuple[float, float], radius: float) -> None:
         self.center = center
         self.radius_km = radius
-        self.date_time = datetime.datetime.strptime(time, "%m:%d:%H:%M")
         self.select_agents_id = []
 
     # ----------------------------
@@ -40,8 +36,9 @@ class EnvironmentInitializer:
         return ((lon_deg + 180.0) % 360.0) - 180.0
 
     @staticmethod
-    def destination_point_spherical(lat_deg: float, lon_deg: float, bearing_rad: float, distance_km: float) -> Tuple[
-        float, float]:
+    def destination_point_spherical(
+        lat_deg: float, lon_deg: float, bearing_rad: float, distance_km: float
+    ) -> Tuple[float, float]:
         """
         Spherical forward (direct) problem.
 
@@ -57,11 +54,15 @@ class EnvironmentInitializer:
         lon1 = math.radians(lon_deg)
         delta = distance_km / EARTH_RADIUS_KM  # angular distance in radians
 
-        lat2 = math.asin(math.sin(lat1) * math.cos(delta) +
-                         math.cos(lat1) * math.sin(delta) * math.cos(bearing_rad))
+        lat2 = math.asin(
+            math.sin(lat1) * math.cos(delta)
+            + math.cos(lat1) * math.sin(delta) * math.cos(bearing_rad)
+        )
 
-        lon2 = lon1 + math.atan2(math.sin(bearing_rad) * math.sin(delta) * math.cos(lat1),
-                                 math.cos(delta) - math.sin(lat1) * math.sin(lat2))
+        lon2 = lon1 + math.atan2(
+            math.sin(bearing_rad) * math.sin(delta) * math.cos(lat1),
+            math.cos(delta) - math.sin(lat1) * math.sin(lat2),
+        )
 
         lat2_deg = math.degrees(lat2)
         lon2_deg = math.degrees(lon2)
@@ -71,8 +72,12 @@ class EnvironmentInitializer:
     # ----------------------------
     # Public API: polygon generation
     # ----------------------------
-    def calculate_evacuation_area(self, radius_km: float = None, center: Tuple[float, float] = None,
-                                  points: int = 360) -> List[Tuple[float, float]]:
+    def calculate_evacuation_area(
+        self,
+        radius_km: float = None,
+        center: Tuple[float, float] = None,
+        points: int = 360,
+    ) -> List[Tuple[float, float]]:
         """
         Build a polygon (list of lat, lon in degrees) approximating a circle on the sphere.
 
@@ -88,8 +93,12 @@ class EnvironmentInitializer:
         lat0, lon0 = center
         polygon: List[Tuple[float, float]] = []
         for k in range(points):
-            bearing_rad = math.radians(k * 360.0 / points)  # adds tolerance if points aren't 360
-            lat2_deg, lon2_deg = self.destination_point_spherical(lat0, lon0, bearing_rad, radius_km)
+            bearing_rad = math.radians(
+                k * 360.0 / points
+            )  # adds tolerance if points aren't 360
+            lat2_deg, lon2_deg = self.destination_point_spherical(
+                lat0, lon0, bearing_rad, radius_km
+            )
             polygon.append((lat2_deg, lon2_deg))
         # Close polygon (optional)
         if polygon:
@@ -113,17 +122,15 @@ class EnvironmentInitializer:
         return max(4, math.ceil(n))
 
     # ----------------------------
-    # Haversine distance (meters)
-    # ----------------------------
-    @staticmethod
-    def haversine_distance_m(point1: tuple[float, float], point2: tuple[float, float]) -> float:
-        return haversine(point1, point2, unit=Unit.METERS, check=True, normalize=True)
-
-    # ----------------------------
     # Plot helpers
     # ----------------------------
-    def latlon_to_local_xy(self, lat_deg: float, lon_deg: float, center_lat_deg: float, center_lon_deg: float) -> Tuple[
-        float, float]:
+    def latlon_to_local_xy(
+        self,
+        lat_deg: float,
+        lon_deg: float,
+        center_lat_deg: float,
+        center_lon_deg: float,
+    ) -> Tuple[float, float]:
         """
         Convert lat/lon differences to local tangential plane meters (east, north),
         using the center as origin. Good for small areas (up to a few 10s km).
@@ -135,7 +142,9 @@ class EnvironmentInitializer:
         y = EARTH_RADIUS_M * dlat_rad  # North (meters)
         return x, y
 
-    def plot_evacuation_area(self, points: int = 360, title: str = None, figsize: tuple = (10, 10)) -> None:
+    def plot_evacuation_area(
+        self, points: int = 360, title: str = None, figsize: tuple = (10, 10)
+    ) -> None:
         """
         Plot evacuation area in local metric coordinates (appears as perfect circle).
         """
@@ -146,21 +155,38 @@ class EnvironmentInitializer:
         polygon = self.calculate_evacuation_area(self.radius_km, self.center, points)
         center_lat, center_lon = self.center
 
-        xy_coords = [self.latlon_to_local_xy(lat, lon, center_lat, center_lon)
-                     for lat, lon in polygon]
+        xy_coords = [
+            self.latlon_to_local_xy(lat, lon, center_lat, center_lon)
+            for lat, lon in polygon
+        ]
         xs, ys = zip(*xy_coords)
 
         # Create plot with enhanced styling
         fig, ax = plt.subplots(figsize=figsize)
 
         # Plot filled area with gradient-like effect
-        ax.fill(xs, ys, alpha=0.3, color='crimson', label=f'Evacuation Area ({self.radius_km} km)',
-                edgecolor='darkred', linewidth=2.5)
+        ax.fill(
+            xs,
+            ys,
+            alpha=0.3,
+            color="crimson",
+            label=f"Evacuation Area ({self.radius_km} km)",
+            edgecolor="darkred",
+            linewidth=2.5,
+        )
 
         # Add center point with enhanced styling
-        ax.plot(0, 0, marker='o', color='black', markersize=10,
-                markerfacecolor='gold', markeredgewidth=2,
-                label='Emergency Center', zorder=5)
+        ax.plot(
+            0,
+            0,
+            marker="o",
+            color="black",
+            markersize=10,
+            markerfacecolor="gold",
+            markeredgewidth=2,
+            label="Emergency Center",
+            zorder=5,
+        )
 
         # Add radius indicators (optional grid circles)
         for r_frac in [0.25, 0.5, 0.75]:
@@ -168,30 +194,37 @@ class EnvironmentInitializer:
             theta = np.linspace(0, 2 * np.pi, 100)
             circle_x = circle_r * np.cos(theta)
             circle_y = circle_r * np.sin(theta)
-            ax.plot(circle_x, circle_y, '--', color='gray', alpha=0.4, linewidth=1)
+            ax.plot(circle_x, circle_y, "--", color="gray", alpha=0.4, linewidth=1)
 
         # Styling and formatting
-        ax.set_xlabel('Easting (meters)', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Northing (meters)', fontsize=12, fontweight='bold')
-        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
-        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
-        ax.set_aspect('equal')
-        ax.legend(loc='upper right', framealpha=0.9, fontsize=11)
+        ax.set_xlabel("Easting (meters)", fontsize=12, fontweight="bold")
+        ax.set_ylabel("Northing (meters)", fontsize=12, fontweight="bold")
+        ax.set_title(title, fontsize=14, fontweight="bold", pad=20)
+        ax.grid(True, alpha=0.3, linestyle="-", linewidth=0.5)
+        ax.set_aspect("equal")
+        ax.legend(loc="upper right", framealpha=0.9, fontsize=11)
 
         # Add coordinate info as text
         max_dist = max(max(xs), max(ys))
-        ax.text(0.02, 0.98, f'Center: ({center_lat:.4f}°, {center_lon:.4f}°) \n  Max Distance{max_dist:.2f} m',
-                transform=ax.transAxes, verticalalignment='top',
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8),
-                fontsize=10)
+        ax.text(
+            0.02,
+            0.98,
+            f"Center: ({center_lat:.4f}°, {center_lon:.4f}°) \n  Max Distance{max_dist:.2f} m",
+            transform=ax.transAxes,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
+            fontsize=10,
+        )
 
         plt.tight_layout()
         plt.show()
 
-    def plot_latlon_deg(self, points: int = 360, title: str = None, figsize: tuple = (12, 8)) -> None:
+    def plot_latlon_deg(
+        self, points: int = 360, title: str = None, figsize: tuple = (12, 8)
+    ) -> None:
         """
-              Plot polygon in lat/lon degrees (will look elliptical visually because degrees
-              are not equal-length in E-W vs N-S). Useful for quick lat/lon inspection.
+        Plot polygon in lat/lon degrees (will look elliptical visually because degrees
+        are not equal-length in E-W vs N-S). Useful for quick lat/lon inspection.
         """
         if title is None:
             title = f"Evacuation Zone - Geographic View ({self.radius_km} km radius)"
@@ -207,32 +240,54 @@ class EnvironmentInitializer:
         fig, ax = plt.subplots(figsize=figsize)
 
         # Plot filled area
-        ax.fill(lons, lats, alpha=0.25, color='crimson',
-                edgecolor='darkred', linewidth=2.5,
-                label=f'Evacuation Boundary ({self.radius_km} km)')
+        ax.fill(
+            lons,
+            lats,
+            alpha=0.25,
+            color="crimson",
+            edgecolor="darkred",
+            linewidth=2.5,
+            label=f"Evacuation Boundary ({self.radius_km} km)",
+        )
 
         # Plot center point
-        ax.plot(self.center[1], self.center[0], marker='o', color='black',
-                markersize=12, markerfacecolor='gold', markeredgewidth=2,
-                label='Emergency Center', zorder=5)
+        ax.plot(
+            self.center[1],
+            self.center[0],
+            marker="o",
+            color="black",
+            markersize=12,
+            markerfacecolor="gold",
+            markeredgewidth=2,
+            label="Emergency Center",
+            zorder=5,
+        )
 
         # Styling and formatting
-        ax.set_xlabel('Longitude (degrees)', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Latitude (degrees)', fontsize=12, fontweight='bold')
-        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
-        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
-        ax.set_aspect('equal')
-        ax.legend(loc='best', framealpha=0.9, fontsize=11)
+        ax.set_xlabel("Longitude (degrees)", fontsize=12, fontweight="bold")
+        ax.set_ylabel("Latitude (degrees)", fontsize=12, fontweight="bold")
+        ax.set_title(title, fontsize=14, fontweight="bold", pad=20)
+        ax.grid(True, alpha=0.3, linestyle="-", linewidth=0.5)
+        ax.set_aspect("equal")
+        ax.legend(loc="best", framealpha=0.9, fontsize=11)
 
         # Add coordinate bounds information
-        info_text = (f'Bounds:\n'
-                     f'Lat: {min(lats):.5f}° to {max(lats):.5f}°\n'
-                     f'Lon: {min(lons):.5f}° to {max(lons):.5f}°\n'
-                     f'Center: {self.center[0]:.5f}°, {self.center[1]:.5f}°')
+        info_text = (
+            f"Bounds:\n"
+            f"Lat: {min(lats):.5f}° to {max(lats):.5f}°\n"
+            f"Lon: {min(lons):.5f}° to {max(lons):.5f}°\n"
+            f"Center: {self.center[0]:.5f}°, {self.center[1]:.5f}°"
+        )
 
-        ax.text(0.02, 0.98, info_text, transform=ax.transAxes,
-                verticalalignment='top', fontsize=10,
-                bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.9))
+        ax.text(
+            0.02,
+            0.98,
+            info_text,
+            transform=ax.transAxes,
+            verticalalignment="top",
+            fontsize=10,
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.9),
+        )
 
         # Add margin for better visibility
         margin_lat = lat_range * 0.1
@@ -242,55 +297,3 @@ class EnvironmentInitializer:
 
         plt.tight_layout()
         plt.show()
-
-    @property
-    def __reading_trips_df_and_gathering_their_data(self)->pl.DataFrame:
-
-        target_dt: datetime.datetime = self.date_time
-        target_month = target_dt.month
-        target_day = target_dt.day
-
-
-        gps_df = pl.read_csv("../data/trips_dataset.csv")
-
-        gps_df = gps_df.select(
-            pl.col("Date_EMG").str.to_date(format="%Y-%m-%d", exact=False, strict=False)
-        )
-
-        gps_df = gps_df.filter(
-            (pl.col("Date_EMG").dt.day() == target_day) & (pl.col("Date_EMG").dt.month() == target_month))
-
-        gps_df = gps_df.with_columns(
-            pl.datetime(pl.col("Date_O").dt.year() , pl.col("Date_O").dt.month() , pl.col("Date_O").dt.day() , pl.col("Time_O").dt.hour() ,pl.col("Time_O").dt.minute() ,pl.col("Time_O").dt.second() ).alias("start_datetime") ,
-
-            pl.datetime(pl.col("Date_D").dt.year(), pl.col("Date_D").dt.month(), pl.col("Date_D").dt.day(),
-                        pl.col("Time_D").dt.hour(), pl.col("Time_D").dt.minute(), pl.col("Time_D").dt.second()).alias(
-                "end_datetime")
-
-        )
-        gps_df = gps_df.drop("Time_D" , "Date_D" , "Time_O" , "Date_O")
-
-        gps_df = gps_df.select(["Main_Mode" , "Mode_1" , "Mode_2" , "Mode_3", "Mode_4" , "Mode_5" , "Purpose_O" , "Purpose_D","end_datetime" ,"start_datetime" ,"ID"])
-
-        gc.collect()
-
-        return gps_df
-
-
-    def read_and_parse_their_csvs(self):
-        max_time = self.date_time + datetime.timedelta(hours=1)
-        min_time = self.date_time - datetime.timedelta(hours=1)
-
-        df = self.__reading_trips_df_and_gathering_their_data
-
-        chosen = df.to_dicts()
-
-        del  df
-
-        gc.collect()
-
-        for c_ in chosen:
-            df_c_  = pl.read_csv(f"../data/gps_dataset/{c_.get('ID' , None)}.csv")
-            df_c_.filter()
-
-        #TODO: The logic in which i will read each records df and choose which lat & lon to start from by my agent
