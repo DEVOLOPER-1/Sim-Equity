@@ -1,5 +1,6 @@
 import datetime
 import gc
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -12,6 +13,7 @@ class AgentsGatherer:
         self.polygon_vertices = polygon_vertices
         self.center = self.polygon_vertices[-1]
         self.date_time = datetime.datetime.strptime(time, "%m:%d:%H:%M")
+        self.__data_path = Path(__file__).parent.parent.parent / "data"
 
     @property
     def __reading_trips_df_and_gathering_their_data(self) -> pl.DataFrame:
@@ -20,7 +22,11 @@ class AgentsGatherer:
         target_day = target_dt.day
 
         # read full CSV
-        gps_df = pl.read_csv("../maps_data/trips_dataset.csv", try_parse_dates=False)
+        gps_df = pl.read_csv(
+            f"{self.__data_path}/trips_dataset.csv",
+            try_parse_dates=False,
+            infer_schema_length=10000,
+        )
 
         gps_df = gps_df.with_columns(
             pl.col("Date_EMG")
@@ -74,8 +80,9 @@ class AgentsGatherer:
         return gps_df
 
     def read_and_summarize_agents(
-        self, output_csv_path: str = "../data/mesa_initializers.csv"
+        self, output_csv_path: str = f"mesa_initializers.csv"
     ):
+        output_csv_path = self.__data_path / output_csv_path
         max_time = self.date_time + datetime.timedelta(hours=1)
         min_time = self.date_time - datetime.timedelta(hours=1)
 
@@ -94,7 +101,7 @@ class AgentsGatherer:
             if not agent_id:
                 continue
 
-            gps_path = f"../data/gps_dataset/{agent_id}.csv"
+            gps_path = f"{self.__data_path}/gps_dataset/{agent_id}.csv"
             try:
                 df_c = pl.read_csv(gps_path, try_parse_dates=False)
             except FileNotFoundError:
@@ -124,7 +131,7 @@ class AgentsGatherer:
             )
 
             # clean speeds and compute stats
-            cleaned_speeds = self.eliminate_outliers_iqr(speeds_raw)
+            cleaned_speeds = self.__eliminate_outliers_iqr(speeds_raw)
             median_speed = (
                 float(np.median(cleaned_speeds)) if len(cleaned_speeds) else None
             )
@@ -142,7 +149,7 @@ class AgentsGatherer:
                 if lat is None or lon is None:
                     continue
                 # call your haversine with scalar args
-                d = self.haversine_distance_m((lat, lon), self.center)
+                d = self.__haversine_distance_m((lat, lon), self.center)
                 if d < min_d:
                     min_d = d
                     best_idx = idx
@@ -184,7 +191,7 @@ class AgentsGatherer:
         return summaries
 
     @staticmethod
-    def eliminate_outliers_iqr(vals: List[float]) -> List[float]:
+    def __eliminate_outliers_iqr(vals: List[float]) -> List[float]:
         arr = np.array(
             [v for v in vals if v is not None and not np.isnan(v)], dtype=float
         )
@@ -202,7 +209,7 @@ class AgentsGatherer:
     # Haversine distance (meters)
     # ----------------------------
     @staticmethod
-    def haversine_distance_m(
+    def __haversine_distance_m(
         point1: tuple[float, float], point2: tuple[float, float]
     ) -> float:
         return haversine(point1, point2, unit=Unit.METERS, check=True, normalize=True)

@@ -25,18 +25,17 @@ class EnvironmentInitializer:
     def __init__(self, center: Tuple[float, float], radius: float) -> None:
         self.center = center
         self.radius_km = radius
-        self.select_agents_id = []
 
     # ----------------------------
     # Core geodesic helpers
     # ----------------------------
     @staticmethod
-    def normalize_lon_deg(lon_deg: float) -> float:
+    def __normalize_lon_deg(lon_deg: float) -> float:
         """Normalize longitude to [-180, 180) in degrees."""
         return ((lon_deg + 180.0) % 360.0) - 180.0
 
     @staticmethod
-    def destination_point_spherical(
+    def __determine_forward_position(
         lat_deg: float, lon_deg: float, bearing_rad: float, distance_km: float
     ) -> Tuple[float, float]:
         """
@@ -66,7 +65,7 @@ class EnvironmentInitializer:
 
         lat2_deg = math.degrees(lat2)
         lon2_deg = math.degrees(lon2)
-        lon2_deg = EnvironmentInitializer.normalize_lon_deg(lon2_deg)
+        lon2_deg = EnvironmentInitializer.__normalize_lon_deg(lon2_deg)
         return lat2_deg, lon2_deg
 
     # ----------------------------
@@ -74,8 +73,6 @@ class EnvironmentInitializer:
     # ----------------------------
     def calculate_evacuation_area(
         self,
-        radius_km: float = None,
-        center: Tuple[float, float] = None,
         points: int = 360,
     ) -> List[Tuple[float, float]]:
         """
@@ -85,10 +82,8 @@ class EnvironmentInitializer:
         - center: (lat, lon) in degrees (defaults to self.center)
         - points: number of vertices around the circle
         """
-        if radius_km is None:
-            radius_km = self.radius_km
-        if center is None:
-            center = self.center
+        radius_km = self.radius_km
+        center = self.center
 
         lat0, lon0 = center
         polygon: List[Tuple[float, float]] = []
@@ -96,7 +91,7 @@ class EnvironmentInitializer:
             bearing_rad = math.radians(
                 k * 360.0 / points
             )  # adds tolerance if points aren't 360
-            lat2_deg, lon2_deg = self.destination_point_spherical(
+            lat2_deg, lon2_deg = self.__determine_forward_position(
                 lat0, lon0, bearing_rad, radius_km
             )
             polygon.append((lat2_deg, lon2_deg))
@@ -109,7 +104,7 @@ class EnvironmentInitializer:
     # Utility: compute minimum points for chord length L (meters)
     # ----------------------------
     @staticmethod
-    def needed_points_for_max_chord(radius_m: float, max_chord_m: float) -> int:
+    def __needed_points_for_max_chord(radius_m: float, max_chord_m: float) -> int:
         """
         Choose number of points n so the maximum chord length between adjacent vertices <= max_chord_m.
         """
@@ -124,7 +119,7 @@ class EnvironmentInitializer:
     # ----------------------------
     # Plot helpers
     # ----------------------------
-    def latlon_to_local_xy(
+    def __latlon_to_local_xy(
         self,
         lat_deg: float,
         lon_deg: float,
@@ -156,7 +151,7 @@ class EnvironmentInitializer:
         center_lat, center_lon = self.center
 
         xy_coords = [
-            self.latlon_to_local_xy(lat, lon, center_lat, center_lon)
+            self.__latlon_to_local_xy(lat, lon, center_lat, center_lon)
             for lat, lon in polygon
         ]
         xs, ys = zip(*xy_coords)

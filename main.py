@@ -107,9 +107,9 @@ for w in handlers: w.close()
 """
 
 
-from simulation.space.environment import EnvironmentInitializer
+from simulation.model.agent_initializer import AgentsGatherer
+from simulation.space.evacuation_area_initializer import EnvironmentInitializer
 
-env = EnvironmentInitializer((48.8575, 2.3514), 50, "08:01:18:34")
-env.plot_evacuation_area()
-
-print(env.haversine_distance_m((48.8575, 2.3514), (48.2, 2.3514)))
+env = EnvironmentInitializer((48.8575, 2.3514), 50)
+a_g = AgentsGatherer(env.calculate_evacuation_area(), "08:08:18:20")
+print(a_g.read_and_summarize_agents())
