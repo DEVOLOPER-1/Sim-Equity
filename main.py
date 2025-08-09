@@ -111,5 +111,5 @@ from simulation.model.agent_initializer import AgentsGatherer
 from simulation.space.evacuation_area_initializer import EnvironmentInitializer
 
 env = EnvironmentInitializer((48.8575, 2.3514), 50)
-a_g = AgentsGatherer(env.calculate_evacuation_area(), "08:08:18:20")
+a_g = AgentsGatherer(env.calculate_evacuation_area(), "10:18:21:00")
 print(a_g.read_and_summarize_agents())

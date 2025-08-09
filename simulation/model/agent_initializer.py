@@ -1,7 +1,7 @@
 import datetime
 import gc
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 import polars as pl
@@ -30,15 +30,28 @@ class AgentsGatherer:
 
         gps_df = gps_df.with_columns(
             pl.col("Date_EMG")
-            .str.strptime(pl.Date, "%Y-%m-%d", strict=False)
+            .str.strptime(pl.Date, "%Y-%m-%d", strict=True)
             .alias("Date_EMG_parsed")
         )
+        """
+        print("Unique months in data:")
+        print(gps_df.select(pl.col("Date_EMG_parsed").dt.month().unique().sort()))
 
+        print("Unique days in data:")
+        print(gps_df.select(pl.col("Date_EMG_parsed").dt.day().unique().sort()))
+        print(
+            gps_df.select(
+                pl.col("Date_EMG_parsed").value_counts().sort(descending=True)
+            )
+        )
+
+        print(gps_df.shape)
         gps_df = gps_df.filter(
             (pl.col("Date_EMG_parsed").dt.month() == target_month)
             & (pl.col("Date_EMG_parsed").dt.day() == target_day)
         )
-
+        print(gps_df.shape)
+        """
         gps_df = gps_df.with_columns(
             pl.concat_str(
                 [
@@ -75,29 +88,44 @@ class AgentsGatherer:
                 "end_datetime",
             ]
         )
-
         gc.collect()
         return gps_df
 
     def read_and_summarize_agents(
-        self, output_csv_path: str = f"mesa_initializers.csv"
+        self,
+        output_csv_path: str = "mesa_initializers.csv",
+        hours_window: float = 6,
+        fallback_to_full_trace: bool = False,
+        verbose: bool = True,
     ):
         output_csv_path = self.__data_path / output_csv_path
-        max_time = self.date_time + datetime.timedelta(hours=1)
-        min_time = self.date_time - datetime.timedelta(hours=1)
+        max_time = self.date_time + datetime.timedelta(hours=hours_window)
+        min_time = self.date_time - datetime.timedelta(hours=hours_window)
 
         trips_df = self.__reading_trips_df_and_gathering_their_data
-        chosen_trips = trips_df.select(
+        if verbose:
+            print("Total trips rows:", trips_df.shape[0])
+
+        # FILTER: trip overlaps the window
+        trips_filtered = trips_df.filter(
+            (pl.col("start_datetime") <= pl.lit(max_time))
+            & (pl.col("end_datetime") >= pl.lit(min_time))
+        )
+
+        if verbose:
+            print("Trips overlapping window:", trips_filtered.shape[0])
+
+        chosen_trips = trips_filtered.select(
             ["ID", "Main_Mode", "start_datetime", "end_datetime"]
         ).to_dicts()
-        del trips_df
+
+        del trips_df, trips_filtered
         gc.collect()
 
-        summaries: List[Dict[str, Any]] = []
-
-        for trip_record in chosen_trips:
-            agent_id = trip_record.get("ID")
-            main_mode = trip_record.get("Main_Mode")
+        summaries = []
+        for trip in chosen_trips:
+            agent_id = trip.get("ID")
+            main_mode = trip.get("Main_Mode")
             if not agent_id:
                 continue
 
@@ -105,32 +133,47 @@ class AgentsGatherer:
             try:
                 df_c = pl.read_csv(gps_path, try_parse_dates=False)
             except FileNotFoundError:
-                print(f"Warning: GPS file not found for ID {agent_id}")
+                if verbose:
+                    print(f"GPS file missing for ID {agent_id}")
                 continue
 
-            # parse GPS local datetimes
+            # parse LOCAL DATETIME (non-strict to be tolerant)
             df_c = df_c.with_columns(
                 pl.col("LOCAL DATETIME")
                 .str.strptime(pl.Datetime, "%Y-%m-%d-%H-%M-%S", strict=False)
                 .alias("local_dt")
             )
 
-            # windowed GPS
+            # 1) windowed samples
             df_win = df_c.filter(pl.col("local_dt").is_between(min_time, max_time))
-            if df_win.is_empty():
+
+            # If no windowed samples, optionally fallback to full trace nearest point
+            if df_win.is_empty() and fallback_to_full_trace:
+                if verbose:
+                    print(
+                        f"No samples in window for {agent_id}; falling back to full trace nearest point"
+                    )
+                df_search = df_c  # search whole file
+            else:
+                df_search = df_win
+
+            if df_search.is_empty():
+                # still empty: skip
+                if verbose:
+                    print(f"No GPS samples at all for {agent_id}")
                 continue
 
-            # lists for quick access
-            lats = df_win["LATITUDE"].to_list()
-            lons = df_win["LONGITUDE"].to_list()
-            times = df_win["local_dt"].to_list()
+            # Extract lists
+            lats = df_search["LATITUDE"].to_list()
+            lons = df_search["LONGITUDE"].to_list()
+            times = df_search["local_dt"].to_list()
             speeds_raw = (
-                df_win.get_column("SPEED").to_list()
-                if "SPEED" in df_win.columns
+                df_search.get_column("SPEED").to_list()
+                if "SPEED" in df_search.columns
                 else [None] * len(lats)
             )
 
-            # clean speeds and compute stats
+            # Clean speeds (IQR) and compute stats (use your static)
             cleaned_speeds = self.__eliminate_outliers_iqr(speeds_raw)
             median_speed = (
                 float(np.median(cleaned_speeds)) if len(cleaned_speeds) else None
@@ -142,13 +185,12 @@ class AgentsGatherer:
                 else 0.0
             )
 
-            # find sample closest to center
+            # Find nearest-to-center sample within df_search
             min_d = float("inf")
             best_idx = None
             for idx, (lat, lon) in enumerate(zip(lats, lons)):
                 if lat is None or lon is None:
                     continue
-                # call your haversine with scalar args
                 d = self.__haversine_distance_m((lat, lon), self.center)
                 if d < min_d:
                     min_d = d
@@ -179,13 +221,15 @@ class AgentsGatherer:
                 "n_points_window": len(lats),
                 "min_dist_to_center_m": min_d,
                 "stationary_fraction": stationary_fraction,
+                "used_fallback_full_trace": bool(df_win.is_empty()),
             }
             summaries.append(summary)
 
-        # write output CSV
         if summaries:
             out_df = pl.DataFrame(summaries)
             out_df.write_csv(output_csv_path)
+            if verbose:
+                print("Wrote initializer CSV:", output_csv_path)
 
         gc.collect()
         return summaries
