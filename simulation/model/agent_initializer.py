@@ -30,28 +30,14 @@ class AgentsGatherer:
 
         gps_df = gps_df.with_columns(
             pl.col("Date_EMG")
-            .str.strptime(pl.Date, "%Y-%m-%d", strict=True)
+            .str.strptime(pl.Date, "%Y-%m-%d", strict=True, exact=True)
             .alias("Date_EMG_parsed")
         )
-        """
-        print("Unique months in data:")
-        print(gps_df.select(pl.col("Date_EMG_parsed").dt.month().unique().sort()))
 
-        print("Unique days in data:")
-        print(gps_df.select(pl.col("Date_EMG_parsed").dt.day().unique().sort()))
-        print(
-            gps_df.select(
-                pl.col("Date_EMG_parsed").value_counts().sort(descending=True)
-            )
-        )
-
-        print(gps_df.shape)
-        """
         gps_df = gps_df.filter(
             (pl.col("Date_EMG_parsed").dt.month() == target_month)
             & (pl.col("Date_EMG_parsed").dt.day() == target_day)
         )
-        # print(gps_df.shape)
 
         gps_df = gps_df.with_columns(
             pl.concat_str(
@@ -61,7 +47,9 @@ class AgentsGatherer:
                     pl.col("Time_O").cast(pl.Utf8),
                 ]
             )
-            .str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M:%S", strict=False)
+            .str.strptime(
+                pl.Datetime, format="%Y-%m-%d %H:%M:%S", strict=True, exact=True
+            )
             .alias("start_datetime"),
             pl.concat_str(
                 [
@@ -70,7 +58,9 @@ class AgentsGatherer:
                     pl.col("Time_D").cast(pl.Utf8),
                 ]
             )
-            .str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M:%S", strict=False)
+            .str.strptime(
+                pl.Datetime, format="%Y-%m-%d %H:%M:%S", strict=True, exact=True
+            )
             .alias("end_datetime"),
         )
 
@@ -95,17 +85,19 @@ class AgentsGatherer:
     def read_and_summarize_agents(
         self,
         output_csv_path: str = "mesa_initializers.csv",
-        hours_window: float = 6,
         fallback_to_full_trace: bool = True,
         verbose: bool = True,
     ):
         output_csv_path = self.__data_path / output_csv_path
-        max_time = self.date_time + datetime.timedelta(hours=hours_window)
-        min_time = self.date_time - datetime.timedelta(hours=hours_window)
+
+        # Extract target components (ignoring year)
+        target_month = self.date_time.month
+        target_day = self.date_time.day
+        target_hour = self.date_time.hour
 
         trips_df = self.__reading_trips_df_and_gathering_their_data
         if verbose:
-            print("Total trips rows:", trips_df.shape[0])
+            print("Total trips chosen:", trips_df.shape[0])
 
         chosen_trips = trips_df.select(
             ["ID", "Main_Mode", "start_datetime", "end_datetime"]
@@ -113,7 +105,7 @@ class AgentsGatherer:
         del trips_df
         gc.collect()
 
-        summaries: set[dict[str, Any]] = set()
+        summaries: list[dict[str, Any]] = []
         for trip in chosen_trips:
             agent_id = trip.get("ID")
             main_mode = trip.get("Main_Mode")
@@ -128,44 +120,124 @@ class AgentsGatherer:
                     print(f"GPS file missing for ID {agent_id}")
                 continue
 
-            # parse LOCAL DATETIME (non-strict to be tolerant)
-            df_c = df_c.with_columns(
-                pl.col("LOCAL DATETIME")
-                .str.strptime(pl.Datetime, "%Y-%m-%d-%H-%M-%S", strict=False)
-                .alias("local_dt")
-            )
-
-            # 1) windowed samples
-            df_win = df_c.filter(pl.col("local_dt").is_between(min_time, max_time))
-
-            # If no windowed samples, optionally fallback to full trace nearest point
-            if df_win.is_empty() and fallback_to_full_trace:
-                if verbose:
-                    print(
-                        f"No samples in window for {agent_id}; falling back to full trace nearest point"
+            # Parse LOCAL DATETIME with error handling
+            try:
+                df_c = df_c.with_columns(
+                    pl.col("LOCAL DATETIME")
+                    .str.strptime(
+                        pl.Datetime,
+                        "%Y-%m-%d %H:%M:%S",
+                        strict=True,
+                        exact=True,  # THIS IS THE CORRECT FORMAT DON'T CHANGE!
                     )
-                df_search = df_c  # search whole file
-            else:
-                df_search = df_win
+                    .alias("local_dt")
+                )
+            except Exception as e:
+                if verbose:
+                    print(f"Error parsing datetime for {agent_id}: {e}")
+                continue
 
-            if df_search.is_empty():
-                # still empty: skip
+            # Filter out rows with null datetime
+            df_c = df_c.filter(pl.col("local_dt").is_not_null())
+
+            if df_c.is_empty():
+                if verbose:
+                    print(f"No valid datetime records for {agent_id}")
+                continue
+
+            df_search = None
+            fallback_used = False
+
+            # Primary filter: exact month/day match with time window
+            try:
+                df_win = df_c.filter(
+                    (pl.col("local_dt").dt.month() == target_month)
+                    & (pl.col("local_dt").dt.day() == target_day)
+                    & (
+                        (pl.col("local_dt").dt.hour()).is_between(
+                            target_hour - 3, target_hour + 3
+                        )
+                    )
+                )
+
+                if not df_win.is_empty():
+                    df_search = df_win
+                else:
+                    raise ValueError("No samples in primary window")
+
+            except Exception:
+                if fallback_to_full_trace:
+                    # Fallback 1: Same month/day, any time
+                    try:
+                        df_search = df_c.filter(
+                            (pl.col("local_dt").dt.month() == target_month)
+                            & (pl.col("local_dt").dt.day() == target_day)
+                        )
+                        if df_search.is_empty():
+                            raise ValueError("No samples for same day")
+                        fallback_used = True
+                        if verbose:
+                            print(f"Using same-day fallback for {agent_id}")
+                    except Exception:
+                        # Fallback 2: Same month, any day/time
+                        try:
+                            df_search = df_c.filter(
+                                pl.col("local_dt").dt.month() == target_month
+                            )
+                            if df_search.is_empty():
+                                raise ValueError("No samples for same month")
+                            fallback_used = True
+                            if verbose:
+                                print(f"Using same-month fallback for {agent_id}")
+                        except Exception:
+                            # Fallback 3: Use entire dataset
+                            df_search = df_c
+                            fallback_used = True
+                            if verbose:
+                                print(f"Using full dataset fallback for {agent_id}")
+
+            if df_search is None or df_search.is_empty():
                 if verbose:
                     print(f"No GPS samples at all for {agent_id}")
                 continue
 
-            # Extract lists
-            lats = df_search["LATITUDE"].to_list()
-            lons = df_search["LONGITUDE"].to_list()
-            times = df_search["local_dt"].to_list()
-            speeds_raw = (
-                df_search.get_column("SPEED").to_list()
-                if "SPEED" in df_search.columns
-                else [None] * len(lats)
-            )
+            # Extract data lists
+            try:
+                lats = df_search["LATITUDE"].to_list()
+                lons = df_search["LONGITUDE"].to_list()
+                times = df_search["local_dt"].to_list()
+                speeds_raw = (
+                    df_search.get_column("SPEED").to_list()
+                    if "SPEED" in df_search.columns
+                    else [None] * len(lats)
+                )
+            except Exception as e:
+                if verbose:
+                    print(f"Error extracting data for {agent_id}: {e}")
+                continue
 
-            # Clean speeds (IQR) and compute stats (use your static)
-            cleaned_speeds = self.__eliminate_outliers_iqr(speeds_raw)
+            # Filter out invalid coordinates
+            valid_coords = []
+            valid_times = []
+            valid_speeds = []
+
+            for i, (lat, lon) in enumerate(zip(lats, lons)):
+                if (
+                    lat is not None
+                    and lon is not None
+                    and not (np.isnan(lat) or np.isnan(lon))
+                ):
+                    valid_coords.append((lat, lon))
+                    valid_times.append(times[i])
+                    valid_speeds.append(speeds_raw[i] if i < len(speeds_raw) else None)
+
+            if not valid_coords:
+                if verbose:
+                    print(f"No valid coordinates for {agent_id}")
+                continue
+
+            # Clean speeds and compute statistics
+            cleaned_speeds = self.__eliminate_outliers_iqr(valid_speeds)
             median_speed = (
                 float(np.median(cleaned_speeds)) if len(cleaned_speeds) else None
             )
@@ -176,59 +248,46 @@ class AgentsGatherer:
                 else 0.0
             )
 
-            # Find nearest-to-center sample within df_search
+            # Find nearest-to-center sample
             min_d = float("inf")
             best_idx = None
-            for idx, (lat, lon) in enumerate(zip(lats, lons)):
-                if lat is None or lon is None:
+            for idx, (lat, lon) in enumerate(valid_coords):
+                try:
+                    d = self.__haversine_distance_m((lat, lon), self.center)
+                    if d < min_d:
+                        min_d = d
+                        best_idx = idx
+                except Exception:
                     continue
-                d = self.__haversine_distance_m((lat, lon), self.center)
-                if d < min_d:
-                    min_d = d
-                    best_idx = idx
-                    # Remove the main_mode assignment from here
 
             if best_idx is None:
+                if verbose:
+                    print(f"Could not find valid nearest point for {agent_id}")
                 continue
 
-            # choose starting point (closest sample)
-            start_lat = lats[best_idx]
-            start_lon = lons[best_idx]
-            start_time = times[best_idx]
-
-            # Fix the mode inference logic
-            inferred_mode = None
-            for current_trip in chosen_trips:  # Use different variable name
-                if (
-                    current_trip.get("start_datetime")
-                    <= start_time
-                    <= current_trip.get("end_datetime")
-                ):
-                    inferred_mode = current_trip.get("Main_Mode")
-                    break
-
-            # Keep the original trip's main_mode (already set at loop start)
-            # main_mode is already correctly set from: main_mode = trip.get("Main_Mode")
+            # Extract best sample data
+            start_lat, start_lon = valid_coords[best_idx]
+            start_time = valid_times[best_idx]
 
             summary = {
                 "ID": agent_id,
                 "start_time": start_time.isoformat() if start_time else None,
                 "start_lat": start_lat,
                 "start_lon": start_lon,
-                "inferred_mode": inferred_mode,
                 "main_mode": main_mode,
                 "median_speed_m_s": median_speed,
                 "mean_speed_m_s": mean_speed,
-                "n_points_window": len(lats),
+                "n_points_window": len(valid_coords),
                 "min_dist_to_center_m": min_d,
                 "stationary_fraction": stationary_fraction,
-                "used_fallback_full_trace": bool(df_win.is_empty()),
+                "used_fallback_full_trace": fallback_used,
             }
-            summaries.add(summary)
+            summaries.append(summary)
 
         if summaries:
             out_df = pl.DataFrame(summaries)
             out_df.write_csv(output_csv_path)
+            del out_df
             if verbose:
                 print("Wrote initializer CSV:", output_csv_path)
 
@@ -250,9 +309,6 @@ class AgentsGatherer:
         cleaned = arr[(arr >= lower) & (arr <= upper)]
         return cleaned.tolist()
 
-    # ----------------------------
-    # Haversine distance (meters)
-    # ----------------------------
     @staticmethod
     def __haversine_distance_m(
         point1: tuple[float, float], point2: tuple[float, float]
