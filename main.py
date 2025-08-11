@@ -107,7 +107,7 @@ for w in handlers: w.close()
 """
 
 
-from simulation.model.agent_initializer import AgentsGatherer
+from simulation.model.agents_model_initializer import AgentsGatherer
 from simulation.space.evacuation_area_initializer import EnvironmentInitializer
 
 env = EnvironmentInitializer((48.8575, 2.3514), 50)
