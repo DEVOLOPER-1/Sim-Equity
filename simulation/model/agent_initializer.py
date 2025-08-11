@@ -516,7 +516,3 @@ class AgentsGatherer:
                 else None
             ),
         }
-
-    #
-    # @staticmethod
-    # def __get_activity_speeds(): ...
