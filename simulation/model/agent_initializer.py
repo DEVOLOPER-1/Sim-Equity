@@ -155,7 +155,7 @@ class AgentsGatherer:
                     & (pl.col("local_dt").dt.day() == target_day)
                     & (
                         (pl.col("local_dt").dt.hour()).is_between(
-                            target_hour - 3, target_hour + 3
+                            target_hour - 4, target_hour + 4
                         )
                     )
                 )
@@ -285,9 +285,20 @@ class AgentsGatherer:
             summaries.append(summary)
 
         if summaries:
-            out_df = pl.DataFrame(summaries)
+            base_df = pl.DataFrame(summaries)
+            cleaned_df = self.__make_sure_speeds_are_correct(base_df)
+            walking_speeds_df = self.__get_walking_speed_per_agent(cleaned_df)
+
+            # Join the walking speeds back to the main dataframe
+            out_df = cleaned_df.join(walking_speeds_df, on="ID", how="left")
+
+            if out_df.select("walking_speed_m_s").null_count().item() != 0:
+                out_df = out_df.with_columns("walking_speed_m_s").fill_null(
+                    value=out_df.select("walking_speed_m_s").median().item()
+                )
+
             out_df.write_csv(output_csv_path)
-            del out_df
+            del out_df, base_df, cleaned_df, walking_speeds_df
             if verbose:
                 print("Wrote initializer CSV:", output_csv_path)
 
@@ -314,3 +325,198 @@ class AgentsGatherer:
         point1: tuple[float, float], point2: tuple[float, float]
     ) -> float:
         return haversine(point1, point2, unit=Unit.METERS, check=True, normalize=True)
+
+    def __make_sure_speeds_are_correct(self, df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Clean and validate speeds for each transportation mode by removing outliers.
+
+        Args:
+            df: DataFrame containing agent data with 'main_mode' and speed columns
+
+        Returns:
+            DataFrame with cleaned speed values
+        """
+        if df.is_empty():
+            return df
+
+        # Get unique modes
+        unique_modes = df.select("main_mode").unique().to_series().to_list()
+
+        # Process each mode separately
+        cleaned_dfs = []
+
+        for mode in unique_modes:
+            if mode is None:
+                continue
+
+            # Filter data for this mode
+            mode_df = df.filter(pl.col("main_mode") == mode)
+
+            if mode_df.is_empty():
+                continue
+
+            # Extract speed values for cleaning
+            if "median_speed_m_s" in mode_df.columns:
+                raw_speeds = mode_df.select("median_speed_m_s").to_series().to_list()
+                cleaned_speeds = self.__eliminate_outliers_iqr(raw_speeds)
+
+                # Create mapping of original to cleaned speeds
+                if cleaned_speeds:
+                    # Keep only rows with speeds within the cleaned range
+                    min_clean = min(cleaned_speeds)
+                    max_clean = max(cleaned_speeds)
+
+                    mode_df_cleaned = mode_df.filter(
+                        pl.col("median_speed_m_s").is_between(
+                            min_clean, max_clean, closed="both"
+                        )
+                    )
+                else:
+                    # If no valid speeds after cleaning, keep original data
+                    mode_df_cleaned = mode_df
+            else:
+                # If no speed column, keep as is
+                mode_df_cleaned = mode_df
+
+            cleaned_dfs.append(mode_df_cleaned)
+
+        gc.collect()
+
+        if cleaned_dfs:
+            result_df = pl.concat(cleaned_dfs, how="vertical")
+            return result_df
+        else:
+            return df
+
+    @staticmethod
+    def __get_walking_speed_per_agent(df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Get median walking speed for each agent.
+
+        Args:
+            df: DataFrame containing agent data
+
+        Returns:
+            DataFrame with ID and median walking speed per agent
+        """
+        walking_df = df.filter(pl.col("main_mode") == "WALKING")
+
+        if walking_df.is_empty():
+            return pl.DataFrame({"ID": [], "walking_speed_m_s": []})
+
+        return walking_df.group_by("ID").agg(
+            pl.col("median_speed_m_s").median().alias("walking_speed_m_s")
+        )
+
+    @staticmethod
+    def __get_activity_speeds(df: pl.DataFrame) -> dict[str, float]:
+        """
+        Get median speeds for each transportation mode across all agents.
+
+        Args:
+            df: DataFrame containing agent data with main_mode and speed columns
+
+        Returns:
+            Dictionary mapping transportation modes to their median speeds
+        """
+        if df.is_empty():
+            return {}
+
+        # Group by mode and calculate median speed for each mode
+        mode_speeds = (
+            df.group_by("main_mode")
+            .agg(pl.col("median_speed_m_s").median().alias("mode_median_speed"))
+            .sort("main_mode")
+        )
+
+        # Convert to dictionary
+        result = {}
+        for row in mode_speeds.iter_rows(named=True):
+            mode = row["main_mode"]
+            speed = row["mode_median_speed"]
+            if mode is not None and speed is not None:
+                result[mode] = float(speed)
+
+        return result
+
+    @staticmethod
+    def __get_speed_statistics_by_mode(df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Get comprehensive speed statistics for each transportation mode.
+
+        Args:
+            df: DataFrame containing agent data
+
+        Returns:
+            DataFrame with mode, count, median, mean, std, min, max speeds
+        """
+        if df.is_empty():
+            return pl.DataFrame()
+
+        return (
+            df.group_by("main_mode")
+            .agg(
+                [
+                    pl.count("median_speed_m_s").alias("agent_count"),
+                    pl.col("median_speed_m_s").median().alias("median_speed"),
+                    pl.col("median_speed_m_s").mean().alias("mean_speed"),
+                    pl.col("median_speed_m_s").std().alias("std_speed"),
+                    pl.col("median_speed_m_s").min().alias("min_speed"),
+                    pl.col("median_speed_m_s").max().alias("max_speed"),
+                    pl.col("median_speed_m_s").quantile(0.25).alias("q25_speed"),
+                    pl.col("median_speed_m_s").quantile(0.75).alias("q75_speed"),
+                ]
+            )
+            .sort("main_mode")
+        )
+
+    def get_agent_speed_profiles(self, df: pl.DataFrame = None) -> dict[str, Any]:
+        """
+        Get comprehensive speed analysis for all agents and transportation modes.
+
+        Args:
+            df: Optional DataFrame. If None, will read from the saved CSV file.
+
+        Returns:
+            Dictionary containing various speed statistics and profiles
+        """
+        if df is None:
+            csv_path = self.__data_path / "mesa_initializers.csv"
+            try:
+                df = pl.read_csv(csv_path)
+            except FileNotFoundError:
+                print(f"CSV file not found at {csv_path}")
+                return {}
+
+        if df.is_empty():
+            return {}
+
+        # Clean the speeds first
+        cleaned_df = self.__make_sure_speeds_are_correct(df)
+
+        return {
+            "mode_statistics": self.__get_speed_statistics_by_mode(
+                cleaned_df
+            ).to_dicts(),
+            "activity_speeds": self.__get_activity_speeds(cleaned_df),
+            "walking_speeds_per_agent": self.__get_walking_speed_per_agent(
+                cleaned_df
+            ).to_dicts(),
+            "total_agents": cleaned_df.shape[0],
+            "modes_present": cleaned_df.select("main_mode")
+            .unique()
+            .to_series()
+            .to_list(),
+            "speed_range": (
+                {
+                    "min": float(cleaned_df.select("median_speed_m_s").min().item()),
+                    "max": float(cleaned_df.select("median_speed_m_s").max().item()),
+                }
+                if not cleaned_df.select("median_speed_m_s").null_count().item()
+                else None
+            ),
+        }
+
+    #
+    # @staticmethod
+    # def __get_activity_speeds(): ...
