@@ -119,6 +119,7 @@ class AgentsGatherer:
                 if verbose:
                     print(f"GPS file missing for ID {agent_id}")
                 continue
+            agent_home = self.__get_centroid_of_his_locations(df_c)
 
             # Parse LOCAL DATETIME with error handling
             try:
@@ -280,6 +281,8 @@ class AgentsGatherer:
                 "n_points_window": len(valid_coords),
                 "min_dist_to_center_m": min_d,
                 "stationary_fraction": stationary_fraction,
+                "home_location_lat": agent_home[0],
+                "home_location_lon": agent_home[1],
                 "used_fallback_full_trace": fallback_used,
             }
             summaries.append(summary)
@@ -292,13 +295,42 @@ class AgentsGatherer:
             # Join the walking speeds back to the main dataframe
             out_df = cleaned_df.join(walking_speeds_df, on="ID", how="left")
 
+            # Fill null walking speeds with median
             if out_df.select("walking_speed_m_s").null_count().item() != 0:
-                out_df = out_df.with_columns("walking_speed_m_s").fill_null(
-                    value=out_df.select("walking_speed_m_s").median().item()
+                walking_median = out_df.select("walking_speed_m_s").median().item()
+                out_df = out_df.with_columns(
+                    pl.col("walking_speed_m_s").fill_null(value=walking_median)
                 )
 
+            # Get cycling speeds and join them
+            cycling_speeds_df = self.__get_cycling_speed_per_agent(cleaned_df)
+            out_df = out_df.join(cycling_speeds_df, on="ID", how="left")
+
+            """
+            # Fill null cycling speeds with median
+            if out_df.select("cycling_speed_m_s").null_count().item() != 0:
+                cycling_median = out_df.select("cycling_speed_m_s").median().item()
+                out_df = out_df.with_columns(
+                    pl.col("cycling_speed_m_s").fill_null(value=cycling_median)
+                )
+            """
+
+            svi_scores = pl.read_csv(
+                f"{self.__data_path}/agents_svi_scores.csv"
+            ).select("SVI_normalized", "ID")
+
+            out_df = out_df.join(svi_scores, on="ID", how="left")
+
             out_df.write_csv(output_csv_path)
-            del out_df, base_df, cleaned_df, walking_speeds_df
+
+            del (
+                out_df,
+                base_df,
+                cleaned_df,
+                walking_speeds_df,
+                cycling_speeds_df,
+                svi_scores,
+            )
             if verbose:
                 print("Wrote initializer CSV:", output_csv_path)
 
@@ -406,6 +438,60 @@ class AgentsGatherer:
 
         return walking_df.group_by("ID").agg(
             pl.col("median_speed_m_s").median().alias("walking_speed_m_s")
+        )
+
+    @staticmethod
+    def __get_centroid_of_his_locations(df: pl.DataFrame) -> Tuple[float, float]:
+
+        df = df.select(["LATITUDE", "LONGITUDE", "LOCAL DATETIME"])
+
+        df = df.with_columns(
+            pl.col("LOCAL DATETIME").str.strptime(
+                format="%Y-%m-%d %H:%M:%S", strict=True, exact=True, dtype=pl.Datetime
+            )
+        )
+
+        # Filter for nighttime hours (10 PM to 5 AM)
+        df = df.filter(
+            (pl.col("LOCAL DATETIME").dt.hour() >= 22)
+            | (pl.col("LOCAL DATETIME").dt.hour() <= 5)
+        )
+
+        # Check if we have any data after filtering
+        if df.is_empty():
+            gc.collect()
+            return None, None  # or raise an exception
+
+        # Check again after coordinate filtering
+        if df.is_empty():
+            gc.collect()
+            return None, None
+
+        c_lat = df.select("LATITUDE").mean().item()
+        c_lon = df.select("LONGITUDE").mean().item()
+
+        del df
+        gc.collect()
+        return c_lat, c_lon
+
+    @staticmethod
+    def __get_cycling_speed_per_agent(df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Get median walking speed for each agent.
+
+        Args:
+            df: DataFrame containing agent data
+
+        Returns:
+            DataFrame with ID and median walking speed per agent
+        """
+        walking_df = df.filter(pl.col("main_mode") == "BIKE")
+
+        if walking_df.is_empty():
+            return pl.DataFrame({"ID": [], "cycling_speed_m_s": []})
+
+        return walking_df.group_by("ID").agg(
+            pl.col("median_speed_m_s").median().alias("cycling_speed_m_s")
         )
 
     @staticmethod

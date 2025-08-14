@@ -147,7 +147,7 @@ class EnvironmentInitializer:
             title = f"Evacuation Zone - {self.radius_km} km radius"
 
         # Generate polygon and convert to local coordinates
-        polygon = self.calculate_evacuation_area(self.radius_km, self.center, points)
+        polygon = self.calculate_evacuation_area()
         center_lat, center_lon = self.center
 
         xy_coords = [
@@ -224,7 +224,7 @@ class EnvironmentInitializer:
         if title is None:
             title = f"Evacuation Zone - Geographic View ({self.radius_km} km radius)"
 
-        polygon = self.calculate_evacuation_area(self.radius_km, self.center, points)
+        polygon = self.calculate_evacuation_area()
         lats, lons = zip(*polygon)
 
         # Calculate bounds for better display
