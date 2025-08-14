@@ -2879,6 +2879,7 @@ dependencies = [
     { name = "pynsee" },
     { name = "pyrosm" },
     { name = "scikit-learn" },
+    { name = "shapely" },
     { name = "ydata-profiling" },
 ]
 
@@ -2903,6 +2904,7 @@ requires-dist = [
     { name = "pynsee", specifier = ">=0.2.3" },
     { name = "pyrosm", specifier = ">=0.6.2" },
     { name = "scikit-learn", specifier = ">=1.7.0" },
+    { name = "shapely", specifier = ">=2.1.1" },
     { name = "ydata-profiling", specifier = ">=4.16.1" },
 ]
 
