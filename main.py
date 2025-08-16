@@ -10,6 +10,7 @@
 
 import gc
 from datetime import datetime
+from typing import Any
 
 import osmnx as ox
 import polars as pl
@@ -24,9 +25,10 @@ from simulation.space.evacuation_area_initializer import EnvironmentInitializer
 
 
 def select_amenities_out_evacuation_area(
-    amenities_df: pl.DataFrame, agents_gatherer_object: AgentsGatherer
+    amenities_df: pl.DataFrame,
+    agents_gatherer_object: AgentsGatherer,
+    selected: list[Any],
 ):
-    selected = []
     for amenity in amenities_df.iter_rows(named=True):
         if not agents_gatherer_object.are_coords_in_the_evacuation_area(
             (amenity.get("latitude"), amenity.get("longitude"))
@@ -116,10 +118,13 @@ def main():
     G_drive = ox.load_graphml(DRIVE_GRAPH_PATH)
     G_walk = ox.load_graphml(WALK_GRAPH_PATH)
     G_cycle = ox.load_graphml(CYCLE_GRAPH_PATH)
+    selected = []
 
     amenities_df = select_amenities_out_evacuation_area(
-        pl.read_csv(AMENITIES_PATH), agents_gatherer
+        pl.read_csv(AMENITIES_PATH), agents_gatherer, selected
     )
+    del selected
+
     print(f"-> Found {amenities_df.shape[0]} shelters outside the evacuation zone.")
 
     gc.collect()
