@@ -5,13 +5,20 @@ from typing import Any, List, Tuple
 
 import numpy as np
 import polars as pl
+import shapely
 from haversine.haversine import haversine, Unit
+from shapely.geometry import Point
 
 
 class AgentsGatherer:
-    def __init__(self, polygon_vertices: List[Tuple[float, float]], time: str) -> None:
-        self.polygon_vertices = polygon_vertices
-        self.center = self.polygon_vertices[-1]
+    def __init__(
+        self,
+        evac_area_center: tuple[float, float],
+        evacuation_area_polygon: shapely.geometry.Polygon,
+        time: str,
+    ) -> None:
+        self.center = evac_area_center
+        self.evacuation_area_polygon = evacuation_area_polygon
         self.date_time = datetime.datetime.strptime(time, "%m:%d:%H:%M")
         self.__data_path = Path(__file__).parent.parent.parent / "data"
 
@@ -255,7 +262,7 @@ class AgentsGatherer:
             for idx, (lat, lon) in enumerate(valid_coords):
                 try:
                     d = self.__haversine_distance_m((lat, lon), self.center)
-                    if d < min_d:
+                    if d < min_d and self.are_coords_in_the_evacuation_area((lat, lon)):
                         min_d = d
                         best_idx = idx
                 except Exception:
@@ -357,6 +364,10 @@ class AgentsGatherer:
         point1: tuple[float, float], point2: tuple[float, float]
     ) -> float:
         return haversine(point1, point2, unit=Unit.METERS, check=True, normalize=True)
+
+    def are_coords_in_the_evacuation_area(self, pos: tuple[float, float]):
+        """Checks if a (lat, lon) point is inside the evacuation polygon."""
+        return self.evacuation_area_polygon.contains(Point(pos[0], pos[1]))
 
     def __make_sure_speeds_are_correct(self, df: pl.DataFrame) -> pl.DataFrame:
         """

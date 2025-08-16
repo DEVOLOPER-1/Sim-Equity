@@ -3,6 +3,8 @@ from typing import List, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+import shapely
+from shapely.geometry import Polygon
 
 EARTH_RADIUS_KM = 6371.0088
 EARTH_RADIUS_M = EARTH_RADIUS_KM * 1000.0
@@ -23,8 +25,13 @@ class EnvironmentInitializer:
     """
 
     def __init__(self, center: Tuple[float, float], radius: float) -> None:
+
+        self.made_polygon = None
         self.center = center
         self.radius_km = radius
+
+        if self.made_polygon is None:
+            self.__build_the_polygon()
 
     # ----------------------------
     # Core geodesic helpers
@@ -71,7 +78,7 @@ class EnvironmentInitializer:
     # ----------------------------
     # Public API: polygon generation
     # ----------------------------
-    def calculate_evacuation_area(
+    def __calculate_evacuation_area(
         self,
         points: int = 360,
     ) -> List[Tuple[float, float]]:
@@ -147,7 +154,7 @@ class EnvironmentInitializer:
             title = f"Evacuation Zone - {self.radius_km} km radius"
 
         # Generate polygon and convert to local coordinates
-        polygon = self.calculate_evacuation_area()
+        polygon = self.__calculate_evacuation_area()
         center_lat, center_lon = self.center
 
         xy_coords = [
@@ -214,6 +221,13 @@ class EnvironmentInitializer:
         plt.tight_layout()
         plt.show()
 
+    def __build_the_polygon(self):
+        self.made_polygon = Polygon(self.__calculate_evacuation_area())
+
+    @property
+    def get_made_polygon(self) -> shapely.geometry.Polygon:
+        return self.made_polygon
+
     def plot_latlon_deg(
         self, points: int = 360, title: str = None, figsize: tuple = (12, 8)
     ) -> None:
@@ -224,7 +238,7 @@ class EnvironmentInitializer:
         if title is None:
             title = f"Evacuation Zone - Geographic View ({self.radius_km} km radius)"
 
-        polygon = self.calculate_evacuation_area()
+        polygon = self.__calculate_evacuation_area()
         lats, lons = zip(*polygon)
 
         # Calculate bounds for better display

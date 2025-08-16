@@ -9,7 +9,8 @@ import mesa
 import networkx as nx
 import osmnx as ox
 import polars as pl
-from shapely.geometry import Point, Polygon
+import shapely.geometry
+from shapely.geometry import Point
 
 
 # --- AGENT DEFINITION ---
@@ -22,7 +23,7 @@ class EvacuationAgent(mesa.Agent):
     vulnerability, assets, and behavioral parameters.
     """
 
-    def __init__(self, unique_id, model, **kwargs):
+    def __init__(self, unique_id: str, model: mesa.Model, **kwargs):
         """
 
         Initialize an agent with properties derived from the initializer CSV.
@@ -31,7 +32,7 @@ class EvacuationAgent(mesa.Agent):
             model (mesa.Model): The parent model instance.
             **kwargs: A dictionary of agent properties from the input CSV.
         """
-        super().__init__(unique_id, model)
+        super().__init__(model)
 
         # --- Core Properties & State Machine ---
         self.status = "INACTIVE"  # State machine: INACTIVE -> PLANNING -> EVACUATING -> (ARRIVED | FAILED)
@@ -56,11 +57,17 @@ class EvacuationAgent(mesa.Agent):
         self.evacuation_time = 0  # Seconds since activation
 
         # --- SVI-driven Behavioral Parameters ---
+
         # 1. Reaction Delay: Higher SVI means a slower reaction time.
         start_delay_s = self.svi * self.model.max_svi_start_delay_s
         self.effective_activation_time = self.initial_activation_time + timedelta(
             seconds=start_delay_s
         )
+        """
+        Timing Human Response in Real Fires ---> paper related
+        Human behaviour during a healthcare facility evacuation drills:
+        Investigation of pre-evacuation and travel phases ----> not much related
+        """
 
         # 2. Speed Penalty: Higher SVI makes the agent move slower.
         # We fetch the base speed appropriate for the agent's main mode.
@@ -68,19 +75,31 @@ class EvacuationAgent(mesa.Agent):
         self.speed_m_s = base_speed_m_s * (
             1.0 - self.svi * self.model.svi_speed_penalty
         )
+        """
+        Using svi_speed_penalty & multiplying it by svi is determining the percentage of loss of speed that the agent can loose ,
+        the agent can loose upto 50% of his speed based on his SVI score , it's like a vulnerability tax
+        """
 
         # 3. Patience/Rerouting: Higher SVI means less patience when stuck.
         self.patience_threshold_s = self.model.base_patience_s * (1.0 - self.svi)
         self.time_stuck_s = 0
+        """
+        If an agent is the MOST vulnerable (svi = 1.0):
+        patience = 300 * (1.0 - 1.0) = 0 seconds.
+        Interpretation: The most vulnerable agent has zero patience. The very first moment they are detected in a bottleneck, they will attempt to find a new path. This models a panic-driven, reactive behavior.If an agent is the MOST vulnerable (svi = 1.0):
+        Decision making under stress: A selective review ---> may be related paper
+        """
 
     def _get_base_speed(self, kwargs: dict) -> float:
         """Helper to get the appropriate speed from the agent's data."""
         if self.main_mode == "WALKING":
-            return kwargs.get("walking_speed_m_s", 1.4)  # Default walking speed 1.4 m/s
+            return kwargs.get("walking_speed_m_s")  # Default walking speed 1.4 m/s
         elif self.main_mode == "BIKE":
-            return kwargs.get("cycling_speed_m_s", 4.5)  # Default cycling speed 4.5 m/s
+            return kwargs.get("cycling_speed_m_s")  # Default cycling speed 4.5 m/s
         else:  # CAR, PT, etc.
-            return kwargs.get("median_speed_m_s", 8.3)  # Default car speed 30 km/h
+            return kwargs.get(
+                "median_speed_m_s", 8.3
+            )  # Default car speed 30 km/h formula: speed_m/s * 3.6
 
     def step(self):
         """The main logic loop for the agent, executed at each model step."""
@@ -228,11 +247,11 @@ class EvacuationModel(mesa.Model):
         G_walk: nx.MultiDiGraph,
         G_cycle: nx.MultiDiGraph,
         amenities_df: pl.DataFrame,
-        evac_polygon_coords: list,
+        evacuation_area_polygon: shapely.geometry.Polygon,
         start_datetime: datetime,
         step_seconds: int = 60,
         svi_speed_penalty: float = 0.5,
-        max_svi_start_delay_s: int = 1800,
+        max_svi_start_delay_s: int = 1200,
         base_patience_s: int = 300,
     ):
 
@@ -251,7 +270,8 @@ class EvacuationModel(mesa.Model):
         self.G_drive = G_drive
         self.G_walk = G_walk
         self.G_cycle = G_cycle
-        self.evac_polygon = Polygon(evac_polygon_coords)
+        self.evac_polygon = evacuation_area_polygon
+        self.amenities_df = None
 
         # Pre-calculate amenity nodes for fast lookups
         print("Pre-calculating nearest nodes for amenities...")
@@ -262,22 +282,27 @@ class EvacuationModel(mesa.Model):
         print(f"Found {len(self.amenity_nodes)} potential shelter nodes.")
 
         # --- Agent & Scheduling Setup ---
-        self.schedule = mesa.time.RandomActivation(self)
-        for _, agent_data in agents_df.iterrows():
+        # MESA 3.0+: No more schedulers! Agents are automatically managed by model.agents
+        for agent_data in agents_df.iter_rows(named=True):
             agent_id = agent_data.get("ID")
             if agent_id is None:
                 continue
+            # MESA 3.0+: No unique_id parameter needed - automatically assigned
+            # Also, pass agent_id as a separate attribute if you need the original ID
             agent = EvacuationAgent(
-                unique_id=agent_id, model=self, **agent_data.to_dict()
+                model=self,
+                unique_id=agent_id,  # Store your original ID separately
+                **agent_data,
             )
-            self.schedule.add(agent)
+            # MESA 3.0+: No need to add to schedule - agents are automatically added to model.agents
 
         # --- Data Collection & Bottleneck Monitoring ---
         self.edge_load = defaultdict(int)
         self.edge_agents = defaultdict(list)
         self.bottleneck_log = []
 
-        self.datacollector = mesa.DataCollector(
+        # MESA 3.0+: DataCollector is now in mesa.datacollection
+        self.datacollector = mesa.datacollection.DataCollector(
             model_reporters={"bottlenecks": "bottleneck_log"},
             agent_reporters={
                 "SVI": "svi",
@@ -361,6 +386,9 @@ class EvacuationModel(mesa.Model):
         graph = self.get_graph_for_mode(mode)
         # This can be slow if called many times. For large simulations, pre-calculating
         # the shortest path from *all* nodes to the nearest shelter is faster.
+
+        self.amenities_df = ...
+
         try:
             # We find the nearest amenity node to the agent's current position
             return ox.distance.nearest_nodes(
