@@ -50,7 +50,7 @@ def main():
     SCENARIO_START_DATETIME = datetime(2023, 1, 10, 16, 0, 0)  # A Tuesday at 4:00 PM
 
     # -- Simulation Run Parameters --
-    MAX_SIMULATION_STEPS = 180  # Number of steps to run the simulation for
+    MAX_SIMULATION_STEPS = 60  # Number of steps to run the simulation for
     STEP_SECONDS = 60  # Each step represents 60 seconds (1 minute)
     # Total simulation time = 180 steps * 60s/step = 10800s = 3 hours
 

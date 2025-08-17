@@ -336,15 +336,27 @@ class EvacuationModel(mesa.Model):
         print("Pre-calculating nearest nodes for amenities...")
         if len(amenities_df) > 0:
             try:
-                amenity_nodes_series = ox.nearest_nodes(
-                    self.G_walk,
-                    X=amenities_df["longitude"].to_list(),
-                    Y=amenities_df["latitude"].to_list(),
-                )
-                if isinstance(amenity_nodes_series, list):
-                    self.amenity_nodes = amenity_nodes_series
+                # Convert to proper lists first
+                lons = amenities_df["longitude"].to_list()
+                lats = amenities_df["latitude"].to_list()
+
+                amenity_nodes_result = ox.nearest_nodes(self.G_walk, X=lons, Y=lats)
+
+                # Handle different return types from ox.nearest_nodes
+                if hasattr(amenity_nodes_result, "__iter__") and not isinstance(
+                    amenity_nodes_result, (str, int)
+                ):
+                    # It's an array or list-like object
+                    import numpy as np
+
+                    if isinstance(amenity_nodes_result, np.ndarray):
+                        self.amenity_nodes = amenity_nodes_result.tolist()
+                    else:
+                        self.amenity_nodes = list(amenity_nodes_result)
                 else:
-                    self.amenity_nodes = [amenity_nodes_series]  # Single node case
+                    # Single node case
+                    self.amenity_nodes = [amenity_nodes_result]
+
                 print(f"Found {len(self.amenity_nodes)} potential shelter nodes.")
             except Exception as e:
                 print(f"Error pre-calculating amenity nodes: {e}")
@@ -510,7 +522,7 @@ class EvacuationModel(mesa.Model):
         """Finds the closest amenity (shelter) to an agent."""
         if source_node is None or not self.amenity_nodes:
             print(
-                f"No shelter search possible: source_node={source_node}, amenity_nodes={len(self.amenity_nodes)}"
+                f"No shelter search possible: source_node={source_node}, amenity_nodes={len(self.amenity_nodes) if self.amenity_nodes else 0}"
             )
             return None
 
@@ -521,7 +533,24 @@ class EvacuationModel(mesa.Model):
             min_distance = float("inf")
             nearest_shelter_node = None
 
-            for amenity_node in self.amenity_nodes:
+            # Ensure amenity_nodes is a proper list of integers
+            amenity_nodes_list = []
+            if hasattr(self.amenity_nodes, "__iter__"):
+                for node in self.amenity_nodes:
+                    try:
+                        # Convert to int if it's not already
+                        if hasattr(node, "item"):  # numpy scalar
+                            amenity_nodes_list.append(int(node.item()))
+                        else:
+                            amenity_nodes_list.append(int(node))
+                    except (ValueError, TypeError):
+                        continue
+
+            if not amenity_nodes_list:
+                print("No valid amenity nodes found")
+                return None
+
+            for amenity_node in amenity_nodes_list:
                 try:
                     # Calculate distance from agent's current position to this amenity
                     distance = nx.shortest_path_length(
@@ -533,11 +562,16 @@ class EvacuationModel(mesa.Model):
                 except nx.NetworkXNoPath:
                     # No path to this amenity, skip it
                     continue
+                except Exception as e:
+                    print(f"Error calculating path to amenity node {amenity_node}: {e}")
+                    continue
 
             if nearest_shelter_node is not None:
                 print(
                     f"Found shelter node {nearest_shelter_node} at distance {min_distance:.0f}m"
                 )
+            else:
+                print("No reachable shelter found")
 
             return nearest_shelter_node
 
@@ -545,8 +579,16 @@ class EvacuationModel(mesa.Model):
             print(f"Error finding nearest shelter from node {source_node}: {e}")
             # Fallback: just return the first amenity node if everything fails
             if self.amenity_nodes:
-                print(f"Using fallback shelter node: {self.amenity_nodes[0]}")
-                return self.amenity_nodes[0]
+                try:
+                    fallback_node = self.amenity_nodes[0]
+                    if hasattr(fallback_node, "item"):  # numpy scalar
+                        fallback_node = int(fallback_node.item())
+                    else:
+                        fallback_node = int(fallback_node)
+                    print(f"Using fallback shelter node: {fallback_node}")
+                    return fallback_node
+                except:
+                    pass
             return None
 
     def plan_route(
