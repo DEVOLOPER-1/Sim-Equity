@@ -17,7 +17,6 @@ import polars as pl
 from tqdm import tqdm  # For a nice progress bar during the simulation run
 
 from simulation.model.agents_model_initializer import AgentsGatherer
-
 # --- Import your custom modules ---
 # Ensure these files are in the same directory or a properly configured path
 from simulation.model.evacuation_model import EvacuationModel
@@ -166,13 +165,15 @@ def main():
     print("\nStep 5: Extracting simulation results...")
 
     # The model_df contains our bottleneck log for each step
-    model_df = model.datacollector.get_model_vars_dataframe()
+    model_df = pl.DataFrame(model.datacollector.get_model_vars_dataframe())
 
     # The agent_df contains the final state of every agent
     # We need to get the *last* recorded state for each agent.
     raw_agent_df = model.datacollector.get_agent_vars_dataframe().reset_index()
-    final_agent_state_df = raw_agent_df.groupby("AgentID").last().reset_index()
-
+    final_agent_state_df = pl.DataFrame(
+        raw_agent_df.groupby("AgentID").last().reset_index()
+    )
+    del raw_agent_df
     print("-> Results extracted successfully.")
 
     # --- 7. ANALYZE AND VISUALIZE RESULTS ---
