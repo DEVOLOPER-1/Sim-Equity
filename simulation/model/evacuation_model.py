@@ -23,16 +23,19 @@ class EvacuationAgent(mesa.Agent):
     vulnerability, assets, and behavioral parameters.
     """
 
-    def __init__(self, unique_id: str, model: mesa.Model, **kwargs):
+    def __init__(self, model: mesa.Model, original_id: str = None, **kwargs):
         """
-
         Initialize an agent with properties derived from the initializer CSV.
         Args:
-            unique_id (str): The 'ID' of the agent.
             model (mesa.Model): The parent model instance.
+            original_id (str): The original 'ID' of the agent from your data.
             **kwargs: A dictionary of agent properties from the input CSV.
         """
+        # MESA 3.0+: No unique_id parameter - automatically assigned
         super().__init__(model)
+
+        # Store your original ID
+        self.original_id = original_id
 
         # --- Core Properties & State Machine ---
         self.status = "INACTIVE"  # State machine: INACTIVE -> PLANNING -> EVACUATING -> (ARRIVED | FAILED)
@@ -45,7 +48,18 @@ class EvacuationAgent(mesa.Agent):
 
         # --- Position & Routing State ---
         self.start_pos = (kwargs.get("start_lat"), kwargs.get("start_lon"))
-        self.current_pos_node = self.model.get_nearest_node(self.start_pos, "walk")
+        self.current_pos_node = self.model.get_nearest_node(
+            self.start_pos, self.main_mode
+        )  # why it was walk only?!
+
+        # If we can't find a valid starting position, mark agent as failed
+        if self.current_pos_node is None:
+            print(
+                f"Agent {original_id}: Could not find valid starting position for {self.start_pos}"
+            )
+            self.status = "FAILED"
+            self.current_pos_node = 0  # Set to some default to prevent further errors
+
         self.target_node = None
         self.path = []  # List of network nodes to traverse
         self.current_edge = None
@@ -63,11 +77,6 @@ class EvacuationAgent(mesa.Agent):
         self.effective_activation_time = self.initial_activation_time + timedelta(
             seconds=start_delay_s
         )
-        """
-        Timing Human Response in Real Fires ---> paper related
-        Human behaviour during a healthcare facility evacuation drills:
-        Investigation of pre-evacuation and travel phases ----> not much related
-        """
 
         # 2. Speed Penalty: Higher SVI makes the agent move slower.
         # We fetch the base speed appropriate for the agent's main mode.
@@ -75,27 +84,17 @@ class EvacuationAgent(mesa.Agent):
         self.speed_m_s = base_speed_m_s * (
             1.0 - self.svi * self.model.svi_speed_penalty
         )
-        """
-        Using svi_speed_penalty & multiplying it by svi is determining the percentage of loss of speed that the agent can loose ,
-        the agent can loose upto 50% of his speed based on his SVI score , it's like a vulnerability tax
-        """
 
         # 3. Patience/Rerouting: Higher SVI means less patience when stuck.
         self.patience_threshold_s = self.model.base_patience_s * (1.0 - self.svi)
         self.time_stuck_s = 0
-        """
-        If an agent is the MOST vulnerable (svi = 1.0):
-        patience = 300 * (1.0 - 1.0) = 0 seconds.
-        Interpretation: The most vulnerable agent has zero patience. The very first moment they are detected in a bottleneck, they will attempt to find a new path. This models a panic-driven, reactive behavior.If an agent is the MOST vulnerable (svi = 1.0):
-        Decision making under stress: A selective review ---> may be related paper
-        """
 
     def _get_base_speed(self, kwargs: dict) -> float:
         """Helper to get the appropriate speed from the agent's data."""
         if self.main_mode == "WALKING":
-            return kwargs.get("walking_speed_m_s")  # Default walking speed 1.4 m/s
+            return kwargs.get("walking_speed_m_s", 1.4)  # Default walking speed 1.4 m/s
         elif self.main_mode == "BIKE":
-            return kwargs.get("cycling_speed_m_s")  # Default cycling speed 4.5 m/s
+            return kwargs.get("cycling_speed_m_s", 4.5)  # Default cycling speed 4.5 m/s
         else:  # CAR, PT, etc.
             return kwargs.get(
                 "median_speed_m_s", 8.3
@@ -140,6 +139,10 @@ class EvacuationAgent(mesa.Agent):
 
     def plan_evacuation_route(self):
         """Determines agent's destination and calculates the path."""
+        # Skip planning if agent is already failed
+        if self.status == "FAILED":
+            return
+
         # Destination Logic: Is home a safe option?
         is_home_safe = not self.model.is_pos_in_evacuation_area(self.home_location)
 
@@ -154,6 +157,7 @@ class EvacuationAgent(mesa.Agent):
             )
 
         if self.target_node is None:
+            print(f"Agent {self.original_id}: Could not find target destination")
             self.status = "FAILED"
             return
 
@@ -164,6 +168,9 @@ class EvacuationAgent(mesa.Agent):
             self.status = "EVACUATING"
             self.current_edge = None  # Reset edge state for new path
         else:
+            print(
+                f"Agent {self.original_id}: Could not find path from {self.current_pos_node} to {self.target_node}"
+            )
             self.status = "FAILED"  # Failed to find a path
 
     def move(self):
@@ -271,7 +278,7 @@ class EvacuationModel(mesa.Model):
         self.G_walk = G_walk
         self.G_cycle = G_cycle
         self.evac_polygon = evacuation_area_polygon
-        self.amenities_df = None
+        self.amenities_df = amenities_df  # Fixed: was set to None
 
         # Pre-calculate amenity nodes for fast lookups
         print("Pre-calculating nearest nodes for amenities...")
@@ -287,12 +294,11 @@ class EvacuationModel(mesa.Model):
             agent_id = agent_data.get("ID")
             if agent_id is None:
                 continue
-            # MESA 3.0+: No unique_id parameter needed - automatically assigned
-            # Also, pass agent_id as a separate attribute if you need the original ID
+            # MESA 3.0+: No unique_id parameter - automatically assigned
             agent = EvacuationAgent(
                 model=self,
-                unique_id=agent_id,  # Store your original ID separately
-                **agent_data,
+                original_id=agent_id,  # Store your original ID separately
+                **dict(agent_data),
             )
             # MESA 3.0+: No need to add to schedule - agents are automatically added to model.agents
 
@@ -322,8 +328,9 @@ class EvacuationModel(mesa.Model):
         # 2. Advance the simulation clock
         self.sim_time += timedelta(seconds=self.step_seconds)
 
-        # 3. Activate agents one by one
-        self.schedule.step()
+        # 3. MESA 3.0+: Use AgentSet methods to activate agents
+        # RandomActivation equivalent: shuffle agents and call step() on each
+        self.agents.shuffle_do("step")
 
         # 4. Analyze traffic and log bottlenecks after all agents have moved
         self._analyze_and_log_bottlenecks()
@@ -363,43 +370,116 @@ class EvacuationModel(mesa.Model):
 
     def get_graph_for_mode(self, main_mode: str) -> nx.MultiDiGraph:
         """Returns the appropriate network graph based on the agent's mode."""
-        if main_mode == "CAR":
-            return self.G_drive
+        if main_mode == "WALKING":
+            return self.G_walk
         elif main_mode == "BIKE":
             return self.G_cycle
         else:  # WALKING, PT, etc. all use the walking network
-            return self.G_walk
+            return self.G_drive
 
     def get_nearest_node(self, pos: tuple, mode: str):
         """Finds the nearest node on the appropriate graph for a given lat/lon."""
+        # Validate coordinates
+        if pos is None or len(pos) != 2:
+            print(f"Invalid position: {pos}")
+            return None
+
+        lat, lon = pos[0], pos[1]
+
+        # Check if coordinates are valid numbers
+        if lat is None or lon is None:
+            print(f"None coordinates: lat={lat}, lon={lon}")
+            return None
+
+        try:
+            # Convert to float if they're strings
+            lat = float(lat)
+            lon = float(lon)
+        except (ValueError, TypeError):
+            print(f"Non-numeric coordinates: lat={lat}, lon={lon}")
+            return None
+
+        # Check if coordinates are reasonable (basic sanity check)
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            try:
+                lat, lon = lon, lat
+            except Exception as e:
+                print(f"{e}  Invalid coordinate range: lat={lat}, lon={lon}")
+                return None
+
         graph = self.get_graph_for_mode(mode)
-        return ox.distance.nearest_nodes(graph, X=pos[1], Y=pos[0])
+        try:
+            return ox.distance.nearest_nodes(graph, X=lon, Y=lat)
+        except Exception as e:
+            print(f"Error finding nearest node for pos {pos}: {e}")
+            return None
 
     def is_pos_in_evacuation_area(self, pos: tuple) -> bool:
         """Checks if a (lat, lon) point is inside the evacuation polygon."""
-        if pos[0] is None or pos[1] is None:
+        if pos is None or len(pos) != 2:
             return False
-        return self.evac_polygon.contains(Point(pos[1], pos[0]))
+
+        lat, lon = pos[0], pos[1]
+
+        if lat is None or lon is None:
+            return False
+
+        try:
+            lat = float(lat)
+            lon = float(lon)
+        except (ValueError, TypeError):
+            return False
+
+        return self.evac_polygon.contains(Point(lon, lat))
 
     def get_nearest_shelter_node(self, source_node: int, mode: str) -> int:
         """Finds the closest amenity (shelter) to an agent."""
-        graph = self.get_graph_for_mode(mode)
-        # This can be slow if called many times. For large simulations, pre-calculating
-        # the shortest path from *all* nodes to the nearest shelter is faster.
+        if source_node is None:
+            return None
 
-        self.amenities_df = ...
+        graph = self.get_graph_for_mode(mode)
 
         try:
-            # We find the nearest amenity node to the agent's current position
-            return ox.distance.nearest_nodes(
-                graph,
-                X=[self.nodes[source_node]["x"]],
-                Y=[self.nodes[source_node]["y"]],
-                return_dist=False,
-            )[0]
+            # Get the coordinates of the source node (where the agent currently is)
+            # source_x = graph.nodes[source_node]["x"]
+            # source_y = graph.nodes[source_node]["y"]
+
+            # Find the nearest amenity to this source position
+            # We need to find which amenity is closest to the agent's position
+            min_distance = float("inf")
+            nearest_shelter_node = None
+
+            for idx, (amenity_lon, amenity_lat) in enumerate(
+                zip(self.amenities_df["longitude"], self.amenities_df["latitude"])
+            ):
+                # Get the nearest node in our graph to this amenity location
+                amenity_node = ox.distance.nearest_nodes(
+                    graph, X=amenity_lon, Y=amenity_lat
+                )
+
+                # Calculate distance from agent's current position to this amenity
+                try:
+                    # Use NetworkX to find shortest path distance
+                    distance = nx.shortest_path_length(
+                        graph, source_node, amenity_node, weight="length"
+                    )
+                    if distance < min_distance:
+                        min_distance = distance
+                        nearest_shelter_node = amenity_node
+                except nx.NetworkXNoPath:
+                    # No path to this amenity, skip it
+                    continue
+
+            return nearest_shelter_node
 
         except Exception as e:
-            print(f"Error finding nearest shelter: {e}")
+            print(f"Error finding nearest shelter from node {source_node}: {e}")
+            # Fallback: just return the first amenity node if everything fails
+            try:
+                if len(self.amenity_nodes) > 0:
+                    return self.amenity_nodes[0]
+            except:
+                pass
             return None
 
     def plan_route(
