@@ -37,6 +37,17 @@ def select_amenities_out_evacuation_area(
     return pl.DataFrame(selected)
 
 
+# Check CUDA availability
+try:
+    import nx_cugraph as nxcg
+
+    print("✅ CUDA acceleration available")
+    CUDA_AVAILABLE = True
+except ImportError:
+    print("❌ nx-cugraph not found. Install with: uv add nx-cugraph-cu12")
+    CUDA_AVAILABLE = False
+
+
 def main():
     """Main function to run the entire simulation and analysis pipeline."""
 
@@ -189,16 +200,28 @@ def main():
 
     print("\n--- Insight 1: SVI vs. Evacuation Outcome ---")
     analytics.analyze_svi_vs_outcome()
-    analytics.plot_svi_vs_evacuation_time()
+    analytics.plot_svi_vs_evacuation_time(save=True)
 
     print("\n--- Insight 2: The Evacuation Equity Gap ---")
-    analytics.plot_equity_gap()
+    analytics.plot_equity_gap(save=True)
 
     print("\n--- Insight 3: Geospatial Bottleneck Analysis ---")
-    analytics.plot_bottleneck_map(G_drive)
+    analytics.plot_bottleneck_map(G_drive, save=True)
 
     print("\n--- ANALYSIS COMPLETE ---")
 
 
 if __name__ == "__main__":
     main()
+
+"""
+# run with cugraph preferred, then parallel, then networkx; fallback enabled and caching on
+NX_CUGRAPH_AUTOCONFIG=1 \
+NETWORKX_BACKEND_PRIORITY=cugraph,parallel,networkx \
+NETWORKX_BACKEND_PRIORITY_ALGOS=cugraph,parallel,networkx \
+NETWORKX_BACKEND_PRIORITY_GENERATORS=cugraph,parallel,networkx \
+NETWORKX_FALLBACK_TO_NX=True \
+NETWORKX_CACHE_CONVERTED_GRAPHS=True \
+python evacuation_model.py
+
+"""

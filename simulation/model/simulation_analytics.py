@@ -1,5 +1,9 @@
 # FILE: simulation_analytics.py
 # -----------------------------
+import pathlib
+from functools import wraps
+from typing import Any, Callable
+
 import matplotlib.pyplot as plt
 import osmnx as ox
 import polars as pl
@@ -21,6 +25,80 @@ class SimulationAnalytics:
 
         # Process the raw bottleneck log into a more usable format
         self.bottleneck_df = self._process_bottlenecks()
+
+    def autosave(func: Callable) -> Callable:
+        """
+        Decorator for plot methods to add optional saving behaviour.
+
+        Usage: wrapped_plot(self, ..., save=True, save_kwargs={"filename":"my.png"})
+        """
+
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            # Extract save kwargs (remove them before calling original function)
+            save = bool(kwargs.pop("save", True))
+            save_kwargs = kwargs.pop("save_kwargs", None) or {}
+
+            # Call the original plotting function
+            result = func(*args, **kwargs)
+
+            # If saving requested, determine the Figure to save
+            if save:
+                fig = None
+
+                # Case 1: function returned a Figure
+                if isinstance(result, plt.Figure):
+                    fig = result
+                # Case 2: function returned (fig, ax) or [fig, ax]
+                elif (
+                    isinstance(result, (tuple, list))
+                    and len(result) > 0
+                    and isinstance(result[0], plt.Figure)
+                ):
+                    fig = result[0]
+                # Case 3: function returned an Axes-like object (has .figure)
+                elif hasattr(result, "figure") and isinstance(
+                    result.figure, plt.Figure
+                ):
+                    fig = result.figure
+                # Fallback: current figure
+                else:
+                    try:
+                        fig = plt.gcf()
+                    except Exception:
+                        fig = None
+
+                # Call instance save_figure if available
+                if fig is not None:
+                    # assume first arg is self
+                    if len(args) > 0:
+                        self_obj = args[0]
+                        # if object has save_figure method, use it; else use fig.savefig directly
+                        if hasattr(self_obj, "save_figure") and callable(
+                            getattr(self_obj, "save_figure")
+                        ):
+                            self_obj.save_figure(fig=fig, **save_kwargs)
+                        else:
+                            # fallback direct save into 'plots' folder
+                            out_dir = save_kwargs.get("folder", "plots")
+                            pathlib.Path(out_dir).mkdir(parents=True, exist_ok=True)
+                            fname = save_kwargs.get("filename", f"{func.__name__}.png")
+                            dpi = save_kwargs.get("dpi", 600)
+                            fig.savefig(
+                                f"{out_dir}/{fname}", dpi=dpi, bbox_inches="tight"
+                            )
+                    else:
+                        # No self; just save fig directly
+                        out_dir = save_kwargs.get("folder", "plots")
+                        pathlib.Path(out_dir).mkdir(parents=True, exist_ok=True)
+                        fname = save_kwargs.get("filename", f"{func.__name__}.png")
+                        dpi = save_kwargs.get("dpi", 600)
+                        fig.savefig(f"{out_dir}/{fname}", dpi=dpi, bbox_inches="tight")
+
+            # Return original return value to preserve behaviour
+            return result
+
+        return wrapper
 
     def _process_bottlenecks(self) -> pl.DataFrame:
         """Process raw bottleneck data into a structured DataFrame."""
@@ -68,6 +146,7 @@ class SimulationAnalytics:
         print("-" * 40)
         return {"avg_svi_arrived": avg_svi_arrived, "avg_svi_failed": avg_svi_failed}
 
+    @autosave
     def plot_svi_vs_evacuation_time(self, figsize=(10, 6)):
         """Plots SVI against the total evacuation time for successful agents."""
         arrived_agents = self.agent_df.filter(pl.col("status") == "arrived")
@@ -131,6 +210,7 @@ class SimulationAnalytics:
         print("-" * 40)
         return equity_gap_stats
 
+    @autosave
     def plot_equity_gap(self, figsize=(10, 6)):
         """Creates a bar plot showing the average evacuation time by SVI quintile."""
         stats = self.analyze_equity_gap()
@@ -172,6 +252,7 @@ class SimulationAnalytics:
         plt.show()
 
     # --- INSIGHT 3: GEOSPATIAL BOTTLENECK ANALYSIS ---
+    @autosave
     def plot_bottleneck_map(self, G_drive, figsize=(15, 15)):
         """Plots the drive network, highlighting bottlenecks colored by the SVI of stuck agents."""
         if len(self.bottleneck_df) == 0:

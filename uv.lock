@@ -1765,6 +1765,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/64/79/393e991859b56e2ff58c80f9b51ed4f14a2f6b80f886c63ae53676333597/nx_cugraph_cu12-25.6.0.tar.gz", hash = "sha256:86f68e06ff848495c91614857239a3dfac7879228cf10f79a2c84c05305a24ff", size = 5982, upload-time = "2025-06-06T15:11:39.434Z" }
 
 [[package]]
+name = "nx-parallel"
+version = "0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "joblib" },
+    { name = "networkx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/86/2050e23cfe6b872d3a42eefd52db62a0eef6283231a850a1b3ed3348b1dd/nx_parallel-0.3.tar.gz", hash = "sha256:f3b98323f9e160a15698d6471eee59eb90a0356b2da8a9ddd80818445afc0d04", size = 19700, upload-time = "2024-10-27T18:28:07.267Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e7/18/b615e3c081972e2dedaae9554bfdf959dc9148062da90d522e080ba471b8/nx_parallel-0.3-py3-none-any.whl", hash = "sha256:40b5c36504624d7485e5eb487563f6e6d3c18f5ad270a458d1a2ce7c2da4490c", size = 28277, upload-time = "2024-10-27T18:28:05.668Z" },
+]
+
+[[package]]
 name = "openpyxl"
 version = "3.1.5"
 source = { registry = "https://pypi.org/simple" }
@@ -2871,6 +2884,7 @@ dependencies = [
     { name = "mesa-geo" },
     { name = "notebook" },
     { name = "nx-cugraph-cu12" },
+    { name = "nx-parallel" },
     { name = "osmium" },
     { name = "osmnx" },
     { name = "pandas" },
@@ -2896,6 +2910,7 @@ requires-dist = [
     { name = "mesa-geo", specifier = ">=0.9.1" },
     { name = "notebook", specifier = ">=7.4.3" },
     { name = "nx-cugraph-cu12", specifier = ">=25.6.0" },
+    { name = "nx-parallel", specifier = ">=0.3" },
     { name = "osmium", specifier = ">=4.0.2" },
     { name = "osmnx", specifier = ">=2.0.5" },
     { name = "pandas", specifier = ">=2.3.0" },

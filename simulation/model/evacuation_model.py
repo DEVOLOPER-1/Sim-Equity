@@ -4,6 +4,7 @@
 # using the Mesa framework for agent scheduling and interaction.
 from collections import defaultdict
 from datetime import datetime, timedelta
+from typing import Dict
 
 import mesa
 import networkx as nx
@@ -12,8 +13,8 @@ import polars as pl
 import shapely.geometry
 from shapely.geometry import Point
 
-
 # --- AGENT DEFINITION ---
+evacuation_paths_per_agents: Dict = {}
 
 
 class EvacuationAgent(mesa.Agent):
@@ -146,9 +147,10 @@ class EvacuationAgent(mesa.Agent):
 
         # --- State: PLANNING ---
         # The agent decides where to go and calculates its initial route.
+        # --- State: PLANNING ---
+        # The agent decides where to go and calculates its initial route.
         if self.status == "PLANNING":
             self.plan_evacuation_route()
-            return  # End turn after planning
 
         # --- State: EVACUATING ---
         if self.status == "EVACUATING":
@@ -203,8 +205,16 @@ class EvacuationAgent(mesa.Agent):
             self.status = "FAILED"
             return
 
-        # Calculate the path using the model's pathfinding service.
-        self.path = self.model.plan_route(self, self.current_pos_node, self.target_node)
+        if self.original_id in evacuation_paths_per_agents:
+            # Reuse the precomputed path
+            self.path = evacuation_paths_per_agents[self.original_id]
+        else:
+            # Calculate the path and store it
+            # Calculate the path using the model's pathfinding service.
+            self.path: list = self.model.plan_route(
+                self, self.current_pos_node, self.target_node
+            )
+            evacuation_paths_per_agents[self.original_id] = self.path
 
         if self.path and len(self.path) >= 2:
             self.status = "EVACUATING"
