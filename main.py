@@ -17,6 +17,7 @@ import polars as pl
 from tqdm import tqdm  # For a nice progress bar during the simulation run
 
 from simulation.model.agents_model_initializer import AgentsGatherer
+
 # --- Import your custom modules ---
 # Ensure these files are in the same directory or a properly configured path
 from simulation.model.evacuation_model import EvacuationModel
