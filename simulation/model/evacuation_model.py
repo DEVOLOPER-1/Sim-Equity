@@ -1,8 +1,9 @@
 # FILE: evacuation_model.py
 import warnings
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import mesa
 import polars as pl
@@ -18,6 +19,7 @@ class EvacuationAgent(mesa.Agent):
 
     def __init__(self, model: mesa.Model, original_id: str = None, **kwargs):
         super().__init__(model)
+        self.time_stuck_s = None
         self.original_id = original_id
         self.status = "INACTIVE"
         self.svi = float(kwargs.get("SVI_normalized", 0.0))
@@ -47,8 +49,9 @@ class EvacuationAgent(mesa.Agent):
         # Time management
         self._init_timing(kwargs)
 
+    @staticmethod
     def _get_location(
-        self, data: dict, lat_key: str, lon_key: str
+        data: dict, lat_key: str, lon_key: str
     ) -> Optional[Tuple[float, float]]:
         """Extract and validate location coordinates."""
         lat = data.get(lat_key)
@@ -176,7 +179,7 @@ class EvacuationAgent(mesa.Agent):
         try:
             graph = self.model.get_graph_for_mode(self.main_mode)
             u, v = self.current_edge
-            edge_data = graph.get_edge_data(u, v, 0)
+            edge_data = graph.get_edge_data(u, v)
             edge_length = edge_data.get("length", 1.0)
         except (KeyError, TypeError):
             warnings.warn(f"Agent {self.original_id}: Edge data missing")
@@ -193,7 +196,7 @@ class EvacuationAgent(mesa.Agent):
                 self.current_pos_node = v
                 self.path.pop(0)
                 distance_to_travel -= remaining_on_edge
-                self.model.report_edge_usage(self, (u, v, 0))
+                self.model.report_edge_usage(self, (u, v))
 
                 if len(self.path) < 2:
                     self.status = "ARRIVED"
@@ -204,7 +207,7 @@ class EvacuationAgent(mesa.Agent):
                     self.current_edge = (self.path[0], self.path[1])
                     self.edge_progress_m = 0.0
                     try:
-                        edge_data = graph.get_edge_data(*self.current_edge, 0)
+                        edge_data = graph.get_edge_data(*self.current_edge)
                         edge_length = edge_data.get("length", 1.0)
                     except (KeyError, TypeError):
                         warnings.warn(f"Agent {self.original_id}: Next edge missing")
@@ -214,7 +217,7 @@ class EvacuationAgent(mesa.Agent):
                 # Partial progress on current edge
                 self.edge_progress_m += distance_to_travel
                 distance_to_travel = 0
-                self.model.report_edge_usage(self, (u, v, 0))
+                self.model.report_edge_usage(self, (u, v))
 
     def is_stuck_in_traffic(self) -> bool:
         """Check if agent is in congested traffic."""
@@ -226,7 +229,7 @@ class EvacuationAgent(mesa.Agent):
 
 
 class EvacuationModel(mesa.Model):
-    """Core model for evacuation simulation using rustworkx."""
+    """Core model for evacuation simulation using rustworkx with optimized spatial indexing."""
 
     def __init__(
         self,
@@ -260,28 +263,43 @@ class EvacuationModel(mesa.Model):
 
         # Create spatial indexes for each graph
         self.spatial_indexes = {}
+        self.node_points = {}  # Store points for each mode
+        self.node_indices = {}  # Store node indices for each mode
+
         for mode, graph in self.graphs.items():
             points = []
+            node_ids = []
+
             for node_idx in graph.node_indices():
                 node_data = graph[node_idx]
+                point = None
                 if "x" in node_data and "y" in node_data:
-                    points.append(Point(node_data["x"], node_data["y"]))
+                    point = Point(node_data["x"], node_data["y"])
                 elif "coords" in node_data:
-                    points.append(Point(node_data["coords"]))
-            self.spatial_indexes[mode] = STRtree(points)
+                    point = Point(node_data["coords"])
 
-        # Precompute shelter nodes
+                if point:
+                    points.append(point)
+                    node_ids.append(node_idx)
+
+            self.spatial_indexes[mode] = STRtree(points)
+            self.node_points[mode] = points
+            self.node_indices[mode] = node_ids
+
+        # Precompute shelter nodes in parallel
         self.shelter_nodes = self._precompute_shelter_nodes(amenities_df)
 
-        # Edge management
-        self.drive_edge_weights = {}
-        self._initialize_edge_weights()
+        # Initialize drive edge weights in the graph itself
+        self._initialize_drive_edge_weights()
 
         # Create agents
-        for agent_data in agents_df.iter_rows(named=True):
+        agent_data_list = list(agents_df.iter_rows(named=True))
+        for agent_data in agent_data_list:
             EvacuationAgent(model=self, original_id=agent_data.get("ID"), **agent_data)
 
-        # Traffic monitoring
+        print(f"Created {len(self.agents)} agents successfully. {datetime.now()}")
+
+        # Traffic monitoring (only for drive mode)
         self.edge_load = defaultdict(int)
         self.edge_agents = defaultdict(list)
         self.bottleneck_log: List[Dict[str, Any]] = []
@@ -297,67 +315,117 @@ class EvacuationModel(mesa.Model):
             },
         )
 
+    def _initialize_drive_edge_weights(self):
+        """Initialize edge weights directly in the drive graph."""
+        drive_graph = self.graphs["DRIVE"]
+        for edge_idx in drive_graph.edge_indices():
+            edge_data = drive_graph.get_edge_data_by_index(edge_idx)
+            if edge_data is None:
+                continue
+            base_length = edge_data.get("length", 1.0)
+            # Set initial weight to base length
+            edge_data["weight"] = base_length
+
     def _precompute_shelter_nodes(
         self, amenities_df: pl.DataFrame
-    ) -> Dict[str, List[int]]:
-        """Find nearest shelter nodes for each mode."""
-        shelters = {}
-        for mode in ["DRIVE", "WALKING", "BIKE"]:
-            shelters[mode] = []
-            if amenities_df.is_empty():
-                continue
+    ) -> Dict[str, Set[int]]:
+        """Find nearest shelter nodes for each mode in parallel."""
+        shelters = {mode: set() for mode in ["DRIVE", "WALKING", "BIKE"]}
 
-            for row in amenities_df.iter_rows(named=True):
-                pos = (row["latitude"], row["longitude"])
-                if not self.is_pos_in_evacuation_area(pos):
-                    node = self.get_nearest_node(pos, mode)
-                    if node is not None:
-                        shelters[mode].append(node)
+        if amenities_df.is_empty():
+            return shelters
+
+        # Prepare tasks for parallel processing
+        tasks = []
+        for row in amenities_df.iter_rows(named=True):
+            pos = (row["latitude"], row["longitude"])
+            if not self.is_pos_in_evacuation_area(pos):
+                for mode in shelters.keys():
+                    tasks.append((pos, mode))
+
+        # Find nearest nodes in parallel
+        with ThreadPoolExecutor(max_workers=15) as executor:
+            results = list(
+                executor.map(
+                    lambda args: self.get_nearest_node(args[0], args[1]), tasks
+                )
+            )
+
+        # Aggregate results
+        for (pos, mode), node in zip(tasks, results):
+            if node is not None:
+                shelters[mode].add(node)
+
         return shelters
 
+    """
     def _initialize_edge_weights(self):
-        """Initialize edge weights for congestion calculations."""
+        '''Initialize edge weights for congestion calculations.'''
         drive_graph = self.graphs["DRIVE"]
-        for edge in drive_graph.edge_list():
-            u, v, _ = edge
-            edge_data = drive_graph.get_edge_data(u, v, 0)
+        for u, v in drive_graph.edge_list():
+            edge_data = drive_graph.get_edge_data(u, v)
+            if edge_data is None:
+                continue
             base_length = edge_data.get("length", 1.0)
-            self.drive_edge_weights[(u, v, 0)] = base_length
+            self.drive_edge_weights[(u, v)] = base_length
+        """
 
     def step(self):
-        """Advance model by one step."""
+        """Advance model by one step using sequential agent processing."""
         self._update_congestion_weights()
         self.edge_load.clear()
         self.edge_agents.clear()
         self.bottleneck_log = []
         self.sim_time += timedelta(seconds=self.step_seconds)
+
+        # Collect data before stepping agents
+        self.datacollector.collect(self)
+
+        # Process all agents
         self.agents.shuffle_do("step")
+
+        # Analyze bottlenecks
         self._analyze_and_log_bottlenecks()
+
+        # Collect data after stepping agents
         self.datacollector.collect(self)
 
     def _update_congestion_weights(self):
-        """Update edge weights based on current congestion."""
+        """Update edge weights in the graph based on current congestion."""
+        drive_graph = self.graphs["DRIVE"]
         for edge, load in self.edge_load.items():
-            if edge in self.drive_edge_weights:
-                u, v, key = edge
-                graph = self.graphs["DRIVE"]
-                try:
-                    edge_data = graph.get_edge_data(u, v, key)
-                    capacity = edge_data.get("capacity", 20)
-                    congestion = load / capacity if capacity > 0 else float("inf")
-                    base_length = edge_data.get("length", 1.0)
-                    weight = max(0.001, base_length * (1.0 + congestion))
-                    self.drive_edge_weights[edge] = weight
-                except (KeyError, TypeError):
+            u, v = edge
+            edge_indices = drive_graph.edge_indices_from_endpoints(u, v)
+
+            # Handle the case where multiple edges exist between the same nodes
+            if not edge_indices:
+                continue
+
+            # Option 1: Update all edges between these nodes (recommended)
+            for edge_idx in edge_indices:
+                edge_data = drive_graph.get_edge_data_by_index(edge_idx)
+                if edge_data is None:
                     continue
+
+                capacity = edge_data.get("capacity", 20)
+                congestion = load / capacity if capacity > 0 else float("inf")
+                base_length = edge_data.get("length", 1.0)
+                weight = max(0.001, base_length * (1.0 + congestion))
+                # Update weight directly in edge data
+                edge_data["weight"] = weight
 
     def _analyze_and_log_bottlenecks(self):
         """Log congested edges."""
+        if not self.edge_load:
+            return
+
         for edge, load in self.edge_load.items():
             try:
-                u, v, key = edge
+                u, v = edge
                 graph = self.graphs["DRIVE"]
-                edge_data = graph.get_edge_data(u, v, key)
+                edge_data = graph.get_edge_data(u, v)
+                if edge_data is None:
+                    continue
                 capacity = edge_data.get("capacity", 20)
 
                 if 0 < capacity < load:
@@ -386,39 +454,25 @@ class EvacuationModel(mesa.Model):
         return self.graphs.get(mode_key, self.graphs["DRIVE"])
 
     def get_nearest_node(self, pos: tuple, mode: str) -> Optional[int]:
-        """Find nearest node using spatial index."""
+        """Find nearest node using spatial index with O(1) lookup."""
         if pos is None or len(pos) != 2:
             return None
 
         target_point = Point(pos[1], pos[0])  # (lon, lat) format
-        graph = self.get_graph_for_mode(mode)
         spatial_index = self.spatial_indexes.get(mode.upper())
+        points = self.node_points.get(mode.upper())
+        node_indices = self.node_indices.get(mode.upper())
 
-        if spatial_index is None:
+        if spatial_index is None or not points or not node_indices:
             return None
 
-        nearest = spatial_index.nearest(target_point)
-        if not nearest:
+        # Find nearest point index from spatial index
+        nearest_idx = spatial_index.nearest(target_point)
+        if nearest_idx is None or nearest_idx >= len(node_indices):
             return None
 
-        # Find the exact nearest node
-        min_distance = float("inf")
-        nearest_node = None
-        for node_idx in graph.node_indices():
-            node_data = graph[node_idx]
-            if "x" in node_data and "y" in node_data:
-                node_point = Point(node_data["x"], node_data["y"])
-            elif "coords" in node_data:
-                node_point = Point(node_data["coords"])
-            else:
-                continue
-
-            distance = target_point.distance(node_point)
-            if distance < min_distance:
-                min_distance = distance
-                nearest_node = node_idx
-
-        return nearest_node
+        # Return the corresponding node index
+        return node_indices[nearest_idx]
 
     def is_pos_in_evacuation_area(self, pos: tuple) -> bool:
         """Check if position is within evacuation zone."""
@@ -432,67 +486,68 @@ class EvacuationModel(mesa.Model):
             return None
 
         mode_key = "DRIVE" if mode not in ["WALKING", "BIKE"] else mode.upper()
-        shelters = self.shelter_nodes.get(mode_key, [])
+        shelters = self.shelter_nodes.get(mode_key, set())
         if not shelters:
             return None
 
         graph = self.get_graph_for_mode(mode)
 
-        # Calculate shortest paths to all shelters
+        # Compute all distances from source_node
         try:
-            paths = rx.dijkstra_shortest_paths(
-                graph,
-                source=source_node,
-                target=shelters,
-                weight_fn=lambda e: e.get("length", 1.0),
+            all_distances = rx.dijkstra_shortest_path_lengths(
+                graph, node=source_node, edge_cost_fn=lambda e: e.get("length", 1.0)
             )
-
-            # Find closest shelter
-            min_distance = float("inf")
-            nearest_shelter = None
-            for shelter, (distance, _) in paths.items():
-                if distance < min_distance:
-                    min_distance = distance
-                    nearest_shelter = shelter
-            return nearest_shelter
-        except rx.NullGraph:
+        except (rx.NullGraph, ValueError):
             return None
+
+        # Find closest shelter from the computed distances
+        min_distance = float("inf")
+        nearest_shelter = None
+        for shelter in shelters:
+            distance = all_distances.get(shelter, float("inf"))
+            if distance < min_distance:
+                min_distance = distance
+                nearest_shelter = shelter
+
+        return nearest_shelter
 
     def plan_route(self, mode: str, source_node: int, target_node: int) -> List[int]:
         """Plan route between nodes using rustworkx."""
-        if source_node is None or target_node is None:
+        if source_node is None or target_node is None or source_node == target_node:
             return []
 
         graph = self.get_graph_for_mode(mode)
 
-        # Use different weight functions based on mode
-        if mode == "DRIVE":
-            weight_fn = lambda e: self.drive_edge_weights.get(
-                (e[0], e[1], 0), e.get("length", 1.0)
-            )
+        # Use weight attribute for drive mode, length for others
+        if mode != "WALKING" and mode != "BIKE":
+            weight_fn = lambda e: float(e.get("weight", 1.0))
         else:
-            weight_fn = lambda e: e.get("length", 1.0)
+            weight_fn = lambda e: float(e.get("length", 1.0))
 
         try:
-            path = rx.dijkstra_shortest_paths(
+            path_dict = rx.dijkstra_shortest_paths(
                 graph, source=source_node, target=target_node, weight_fn=weight_fn
             )
-            return path.get(target_node, [])
+            return path_dict.get(target_node, [])
         except (rx.NullGraph, ValueError):
             return []
 
     def report_edge_usage(self, agent: EvacuationAgent, edge: tuple):
-        """Record edge usage for congestion calculation."""
-        self.edge_load[edge] += 1
-        self.edge_agents[edge].append(agent)
+        """Record edge usage only for drive mode agents."""
+        # Only track drive agents (others don't cause congestion)
+        if agent.main_mode not in ["WALKING", "BIKE"]:
+            self.edge_load[edge] += 1
+            self.edge_agents[edge].append(agent)
 
     def get_edge_congestion(self, edge: tuple) -> float:
         """Calculate current congestion level for an edge."""
         try:
             load = self.edge_load.get(edge, 0)
-            u, v, key = edge
+            u, v = edge
             graph = self.graphs["DRIVE"]
-            edge_data = graph.get_edge_data(u, v, key)
+            edge_data = graph.get_edge_data(u, v)
+            if edge_data is None:
+                return 0.0
             capacity = edge_data.get("capacity", 20)
             return load / capacity if capacity > 0 else float("inf")
         except KeyError:
