@@ -1,8 +1,9 @@
 # FILE: evacuation_model.py
 # -----------------------------
 # This module defines the core agent-based model for the evacuation simulation.
-# It has been refactored for performance, clarity, and correctness, using rustworkx
-# for graph operations and a robust state machine for agent behavior.
+# It has been refactored for performance, clarity, and correctness, using OSMnx
+# for efficient spatial operations and a robust state machine for agent behavior.
+
 import gc
 import time
 import warnings
@@ -12,17 +13,24 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import mesa
 import networkx as nx
+import osmnx as ox
 import polars as pl
 import tqdm
 from rustworkx import PathMapping
+from scipy.spatial import KDTree
 from shapely.geometry import Point
 from shapely.geometry import Polygon
 from shapely.strtree import STRtree
 
+# Configure OSMnx for better performance
+ox.settings.use_cache = True
+ox.settings.log_console = False
+ox.settings.timeout = 300
+
 
 class HybridGraphManager:
     """
-    Uses NetworkX for reliable pathfinding and RustWorkX for fast spatial operations
+    Uses NetworkX for reliable pathfinding and OSMnx for fast spatial operations
     """
 
     def __init__(self, graphml_path: str):
@@ -30,7 +38,7 @@ class HybridGraphManager:
         start = time.time()
 
         # Load NetworkX for pathfinding (reliable)
-        self.nx_graph = nx.read_graphml(graphml_path)
+        self.nx_graph = ox.load_graphml(graphml_path)
         print(f"   NetworkX loaded: {self.nx_graph.number_of_nodes()} nodes")
 
         # Convert numeric attributes to floats
@@ -39,8 +47,33 @@ class HybridGraphManager:
         # Build spatial index from NetworkX data (fast spatial queries)
         self._build_spatial_index()
 
+        # Precompute node coordinates for OSMnx functions
+        self._extract_node_coordinates()
+
         load_time = time.time() - start
         print(f"✅ Hybrid graphs loaded in {load_time:.2f}s")
+
+    def _extract_node_coordinates(self):
+        """Extract node coordinates for efficient OSMnx operations"""
+        self.node_coords = {}
+        self.node_ids = []
+        self.node_points = []
+
+        for node_id, data in self.nx_graph.nodes(data=True):
+            if "x" in data and "y" in data:
+                try:
+                    x, y = float(data["x"]), float(data["y"])
+                    self.node_coords[node_id] = (y, x)  # (lat, lon)
+                    self.node_ids.append(node_id)
+                    self.node_points.append((y, x))
+                except (ValueError, TypeError):
+                    continue
+
+        # Create KDTree for fast spatial queries
+        if self.node_points:
+            self.kdtree = KDTree(self.node_points)
+        else:
+            self.kdtree = None
 
     def _convert_numeric_attributes(self):
         """Convert known numeric attributes to floats"""
@@ -85,23 +118,22 @@ class HybridGraphManager:
         print(f"   Spatial index built with {len(points)} nodes")
 
     def get_nearest_node(self, pos: tuple) -> Optional[int]:
-        """Fast spatial search using STRtree"""
-        if pos is None:
+        """Fast spatial search using OSMnx's optimized methods"""
+        if pos is None or self.kdtree is None:
             return None
 
         try:
-            # pos = (lat, lon), Point expects (lon, lat)
-            target_point = Point(pos[1], pos[0])
-            nearest_idx = self.spatial_index.nearest(target_point)
-
-            if nearest_idx is not None:
-                return self.spatial_node_mapping[nearest_idx]
-
-        except Exception:
-            # Fallback to manual search
+            # Use OSMnx's efficient nearest node search
+            if hasattr(self, "kdtree") and self.kdtree is not None:
+                # Find the nearest node using KDTree
+                dist, idx = self.kdtree.query([pos], k=1)
+                return self.node_ids[idx[0]]
+            else:
+                # Fallback to manual search
+                return self._manual_nearest_node(pos)
+        except Exception as e:
+            warnings.warn(f"Error in nearest node search: {e}")
             return self._manual_nearest_node(pos)
-
-        return None
 
     def _manual_nearest_node(self, pos: tuple) -> Optional[int]:
         """Fallback manual search"""
@@ -165,8 +197,6 @@ class HybridGraphManager:
 
 
 # --- AGENT DEFINITION ---
-
-
 class EvacuationAgent(mesa.Agent):
     """
     Represents a person from the NetMob25 dataset with their own unique
@@ -331,7 +361,7 @@ class EvacuationAgent(mesa.Agent):
         u, v = self.path[0], self.path[1]
 
         # Get edge data using the correct rustworkx method
-        graph = self.model.hybrid_managers[self.main_mode]
+        graph = self.model.hybrid_managers[self.model._normalize_mode(self.main_mode)]
         edge_data = graph.get_edge_data(u, v)
         if edge_data is None:
             warnings.warn(
@@ -371,11 +401,6 @@ class EvacuationAgent(mesa.Agent):
 
 
 # --- MODEL DEFINITION ---
-
-# FILE: evacuation_model.py
-# ... (keep all imports and HybridGraphManager class as is)
-
-
 class EvacuationModel(mesa.Model):
     """
     The main model class for the evacuation simulation.
@@ -428,6 +453,13 @@ class EvacuationModel(mesa.Model):
         shelter_time = time.time() - shelter_start
         print(f"✅ Shelter nodes computed in {shelter_time:.2f}s")
 
+        # Precompute shelter distance matrices for each mode
+        print("📏 Precomputing shelter distance matrices...")
+        dist_matrix_start = time.time()
+        self.shelter_distance_matrices = self._precompute_shelter_distance_matrices()
+        dist_matrix_time = time.time() - dist_matrix_start
+        print(f"✅ Shelter distance matrices computed in {dist_matrix_time:.2f}s")
+
         # Agent scheduling
         print("👥 Creating agents...")
         agent_start = time.time()
@@ -437,13 +469,27 @@ class EvacuationModel(mesa.Model):
         for agent_data in tqdm.tqdm(
             agents_df.iter_rows(named=True),
             total=agents_df.shape[0],
-            desc="Agents Creation",
+            desc="👥 Creating Agents",
+            unit="agent",
+            unit_scale=True,
+            ncols=120,
+            colour="blue",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
+            ascii=False,
+            dynamic_ncols=True,
+            smoothing=0.3,
+            mininterval=0.1,
+            maxinterval=1.0,
+            leave=True,
         ):
             agent_id = agent_data.get("ID")
             if agent_id:
-                EvacuationAgent(model=self, unique_id=str(agent_id), **agent_data)
-                # EvacuationAgent(model=self, unique_id=str(agent_id), **agent_data)
+                agent = EvacuationAgent(
+                    model=self, unique_id=str(agent_id), **agent_data
+                )
                 agent_count += 1
+                if agent.status == "FAILED":
+                    failed_agents += 1
 
                 if agent_count % 10000 == 0:
                     print(f"   Created {agent_count:,} agents...")
@@ -474,7 +520,7 @@ class EvacuationModel(mesa.Model):
         print(f"📊 Final stats: {len(self.agents):,} agents, {failed_agents} failed")
 
     def _precompute_shelter_nodes(self, amenities_df: pl.DataFrame) -> Dict[str, set]:
-        """OPTIMIZED: Finds nearest graph nodes for all out-of-bounds amenities using spatial indexes."""
+        """OPTIMIZED: Finds nearest graph nodes for all out-of-bounds amenities using OSMnx"""
         shelters = {mode: set() for mode in self.hybrid_managers.keys()}
         if amenities_df.is_empty():
             print("   No amenities data provided")
@@ -482,43 +528,62 @@ class EvacuationModel(mesa.Model):
 
         print(f"   Processing {len(amenities_df):,} amenities...")
 
-        # Filter amenities to only those outside the evacuation zone
         filter_start = time.time()
-        safe_amenities = amenities_df.filter(
-            ~pl.struct(["latitude", "longitude"]).map_elements(
-                lambda pos: self.is_pos_in_evacuation_area(
-                    (pos["latitude"], pos["longitude"])
-                ),
-                return_dtype=pl.Boolean,
-            )
-        )
+
+        rows_ = []
+        for row in amenities_df.iter_rows(named=True):
+            if not self.is_pos_in_evacuation_area(
+                (row["latitude"], row["longitude"]), False  # TODO:TRY TRUE & FALSE
+            ):
+                rows_.append(row)
+
+        safe_amenities = pl.DataFrame(rows_)
+
+        del rows_
+        gc.collect()
         filter_time = time.time() - filter_start
+
         print(
             f"   Filtered to {len(safe_amenities):,} safe amenities in {filter_time:.2f}s"
         )
 
-        # Process each amenity using optimized spatial search
+        if len(safe_amenities) == 0:
+            return shelters
+
+        # Extract coordinates for batch processing
+        amenity_coords = list(
+            zip(
+                safe_amenities["latitude"].to_list(),
+                safe_amenities["longitude"].to_list(),
+            )
+        )
+
+        # Process each mode in parallel using OSMnx's batch nearest node search
         process_start = time.time()
-        processed_count = 0
 
-        for row in safe_amenities.iter_rows(named=True):
-            pos = (row["latitude"], row["longitude"])
-            for mode in shelters.keys():
-                manager = self.hybrid_managers[mode]
-                node = manager.get_nearest_node(pos)
-                if node is not None:
-                    shelters[mode].add(node)
+        for mode, manager in self.hybrid_managers.items():
+            if not hasattr(manager, "kdtree") or manager.kdtree is None:
+                continue
 
-            processed_count += 1
-            if processed_count % 1000 == 0:
-                elapsed = time.time() - process_start
-                rate = processed_count / elapsed
-                remaining = len(safe_amenities) - processed_count
-                eta = remaining / rate if rate > 0 else 0
-                print(
-                    f"   Processed {processed_count:,}/{len(safe_amenities):,} amenities "
-                    f"({rate:.1f}/s, ETA: {eta:.1f}s)"
-                )
+            # Use OSMnx's efficient nearest node search for all amenities at once
+            try:
+                # Find nearest nodes for all amenities in one batch
+                dists, idxs = manager.kdtree.query(amenity_coords, k=1)
+                nearest_nodes = [manager.node_ids[i] for i in idxs]
+
+                # Add to shelters set
+                for node in nearest_nodes:
+                    if node is not None:
+                        shelters[mode].add(node)
+
+                print(f"   Found {len(nearest_nodes):,} shelter nodes for {mode}")
+            except Exception as e:
+                print(f"   Error processing {mode} shelters: {e}")
+                # Fallback to individual processing
+                for pos in amenity_coords:
+                    node = manager.get_nearest_node(pos)
+                    if node is not None:
+                        shelters[mode].add(node)
 
         process_time = time.time() - process_start
         total_shelters = sum(len(s) for s in shelters.values())
@@ -526,6 +591,80 @@ class EvacuationModel(mesa.Model):
         print(f"   Found {total_shelters:,} unique shelter locations across all modes")
 
         return shelters
+
+    def _precompute_shelter_distance_matrices(self) -> Dict[str, dict]:
+        """Precompute distance matrices for all shelter nodes using NetworkX"""
+        distance_matrices = {}
+
+        # Calculate total iterations across all modes
+        total_iterations = sum(
+            len(shelters) for shelters in self.shelter_nodes.values() if shelters
+        )
+
+        # Create single progress bar for all iterations
+        with tqdm.tqdm(
+            total=total_iterations,
+            desc="🗺️ Computing Distance Matrices",
+            unit="shelter",
+            unit_scale=True,
+            ncols=120,
+            colour="green",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
+            ascii=False,
+            dynamic_ncols=True,
+            smoothing=0.3,
+            mininterval=0.1,
+            maxinterval=1.0,
+            leave=True,
+        ) as pbar:
+
+            for mode, shelters in self.shelter_nodes.items():
+                if not shelters:
+                    continue
+
+                manager = self.hybrid_managers.get(mode)
+                if not manager:
+                    continue
+
+                # Update postfix to show current mode
+                pbar.set_postfix(mode=mode, shelters=f"{len(shelters):,}")
+                start_time = time.time()
+
+                try:
+                    G = manager.nx_graph
+                    distance_matrix = {}
+                    shelter_list = list(shelters)
+
+                    # Remove the inner tqdm and just update the main progress bar
+                    for i, source in enumerate(shelter_list):
+                        if source not in G:
+                            pbar.update(1)
+                            continue
+
+                        paths = nx.single_source_dijkstra_path_length(
+                            G, source, weight="length"
+                        )
+
+                        for target in shelter_list:
+                            if target in paths:
+                                distance_matrix[(source, target)] = paths[target]
+
+                        # Update progress bar for each completed shelter
+                        pbar.update(1)
+
+                    distance_matrices[mode] = distance_matrix
+                    print(f"     {mode} completed in {time.time() - start_time:.2f}s")
+
+                except Exception as e:
+                    print(f"     Error computing distance matrix for {mode}: {e}")
+                    distance_matrices[mode] = {}
+                    # Update remaining shelters for this mode
+                    remaining = (
+                        len(shelter_list) - i if "i" in locals() else len(shelter_list)
+                    )
+                    pbar.update(remaining)
+
+        return distance_matrices
 
     def get_nearest_node(self, pos: tuple, mode: str) -> Optional[int]:
         """Public interface - uses HybridGraphManager for nearest node lookup."""
@@ -545,8 +684,8 @@ class EvacuationModel(mesa.Model):
 
         # Count agent statuses for monitoring
         status_counts = defaultdict(int)
-        # for agent in self.agents:
-        #     status_counts[agent.status] += 1
+        for agent in self.agents:
+            status_counts[agent.status] += 1
 
         self.agents.shuffle_do("step")
         self._analyze_and_log_bottlenecks()
@@ -590,9 +729,14 @@ class EvacuationModel(mesa.Model):
 
     # --- HELPER METHODS (API FOR AGENTS) ---
 
-    def is_pos_in_evacuation_area(self, pos: tuple) -> bool:
+    def is_pos_in_evacuation_area(self, pos: tuple, if_lat_lon: bool = True) -> bool:
         """Checks if a (lat, lon) point is inside the evacuation polygon."""
-        return self.evac_polygon.contains(Point(pos[1], pos[0])) if pos else False
+        if if_lat_lon:
+            return self.evac_polygon.contains(
+                Point(pos[1], pos[0])
+            )  # Convert (lat, lon) to (lon, lat)
+
+        return self.evac_polygon.contains(Point(pos[0], pos[1]))  # Already (lon, lat)
 
     def get_nearest_shelter_node(self, source_node: int, mode: str) -> Optional[int]:
         """Finds the closest pre-computed shelter to an agent's current node."""
@@ -605,16 +749,40 @@ class EvacuationModel(mesa.Model):
         if not manager:
             return None
 
+        # Check if source node is already a shelter
+        if source_node in shelters:
+            return source_node
+
+        # Use precomputed distance matrix if available
+        distance_matrix = self.shelter_distance_matrices.get(mode, {})
+        if distance_matrix:
+            try:
+                # Find the closest shelter using precomputed distances
+                min_distance = float("inf")
+                nearest_shelter = None
+
+                for shelter in shelters:
+                    if (source_node, shelter) in distance_matrix:
+                        distance = distance_matrix[(source_node, shelter)]
+                        if distance < min_distance:
+                            min_distance = distance
+                            nearest_shelter = shelter
+
+                if nearest_shelter:
+                    return nearest_shelter
+            except Exception as e:
+                print(f"Error using distance matrix for {mode}: {e}")
+                # Fall back to direct computation
+
+        # Fallback: compute distance to each shelter
         try:
-            # Get distances to all shelter nodes using NetworkX
+            G = manager.nx_graph
             distances = {}
+
             for shelter in shelters:
                 try:
                     path_length = nx.shortest_path_length(
-                        manager.nx_graph,
-                        source=source_node,
-                        target=shelter,
-                        weight="length",
+                        G, source=source_node, target=shelter, weight="length"
                     )
                     distances[shelter] = path_length
                 except nx.NetworkXNoPath:
@@ -626,7 +794,8 @@ class EvacuationModel(mesa.Model):
             # Return the shelter with minimum distance
             return min(distances.items(), key=lambda x: x[1])[0]
 
-        except Exception:
+        except Exception as e:
+            print(f"Error finding nearest shelter for {mode}: {e}")
             return None
 
     def plan_route(
@@ -635,8 +804,12 @@ class EvacuationModel(mesa.Model):
         """Calculates the shortest path using HybridGraphManager, considering dynamic traffic."""
         mode = self._normalize_mode(agent.main_mode)
         manager = self.hybrid_managers.get(mode)
-        if not manager:
+        if not manager or source_node is None or target_node is None:
             return []
+
+        # Check if source and target are the same
+        if source_node == target_node:
+            return [source_node]
 
         agent_speed = max(agent.speed_m_s, 0.1)
 
@@ -664,6 +837,7 @@ class EvacuationModel(mesa.Model):
         else:
             graph = manager.nx_graph
             weight = "length"
+
         gc.collect()
         try:
             return nx.shortest_path(
@@ -693,7 +867,8 @@ class EvacuationModel(mesa.Model):
         except (KeyError, TypeError, ZeroDivisionError):
             return 0.0
 
-    def _normalize_mode(self, mode: str) -> str:
+    @staticmethod
+    def _normalize_mode(mode: str) -> str:
         """Normalize transportation mode to standard keys."""
         mode = mode.upper()
         mode_mapping = {

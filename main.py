@@ -83,7 +83,21 @@ def main():
 
     # Run simulation
     print(f"Running simulation for {MAX_SIMULATION_STEPS} steps... {datetime.now()}")
-    for i in tqdm(range(MAX_SIMULATION_STEPS)):
+    for i in tqdm(
+        range(MAX_SIMULATION_STEPS),
+        total=MAX_SIMULATION_STEPS,
+        desc="🚨 Evacuation Simulation",
+        unit="step",
+        unit_scale=False,
+        ncols=100,
+        colour="red",
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] ETA: {remaining}",
+        ascii=False,
+        dynamic_ncols=True,
+        smoothing=0.1,
+        mininterval=0.5,
+        maxinterval=2.0,
+    ):
         model.step()
     print("-> Simulation complete")
 
