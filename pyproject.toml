@@ -5,6 +5,7 @@ description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
     "adjusttext>=1.3.0",
+    "agentpy>=0.1.5",
     "alive-progress>=3.3.0",
     "black>=25.1.0",
     "cython>=3.1.2",

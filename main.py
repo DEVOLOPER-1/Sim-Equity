@@ -1,12 +1,12 @@
 # FILE: main.py
 import gc
+import time
 from datetime import datetime
 
 import polars as pl
-from tqdm import tqdm
 
 from simulation.model.agents_model_initializer import AgentsGatherer
-from simulation.model.evacuation_model import EvacuationModel
+from simulation.model.evac_mod_agent_py import run_simulation
 from simulation.model.simulation_analytics import SimulationAnalytics
 from simulation.space.evacuation_area_initializer import EnvironmentInitializer
 
@@ -16,12 +16,6 @@ def main():
     SCENARIO_CENTER_LAT = 48.858844
     SCENARIO_CENTER_LON = 2.347012
     SCENARIO_RADIUS_KM = 50.0
-    SCENARIO_START_DATETIME = datetime(2023, 1, 10, 16, 0, 0)
-    MAX_SIMULATION_STEPS = 60
-    STEP_SECONDS = 60
-    SVI_SPEED_PENALTY = 0.5
-    MAX_SVI_START_DELAY_S = 1800
-    BASE_PATIENCE_S = 300
     DATA_DIR = "simulation/maps_data/osmnx_layers/"
 
     print(f"--- SIMULATION STARTING --- {datetime.now()}")
@@ -64,43 +58,40 @@ def main():
 
     print(f"-> Data assets loaded {datetime.now()}")
 
-    # Create model
-    print(f"Instantiating model... {datetime.now()}")
-    model = EvacuationModel(
-        agents_df=agents_df,
-        graphml_path_drive=(DATA_DIR + "IDF_drive_network.graphml"),
-        graphml_path_walk=DATA_DIR + "IDF_walk_network.graphml",
-        graphml_path_cycle=DATA_DIR + "IDF_bike_network.graphml",
-        amenities_df=amenities_df,
-        evacuation_area_polygon=evacuation_area_polygon,
-        start_datetime=SCENARIO_START_DATETIME,
-        step_seconds=STEP_SECONDS,
-        svi_speed_penalty=SVI_SPEED_PENALTY,
-        max_svi_start_delay_s=MAX_SVI_START_DELAY_S,
-        base_patience_s=BASE_PATIENCE_S,
-    )
-    print(f"-> Model instantiated {datetime.now()}")
+    # Define parameters
+    parameters = {
+        "start_datetime": datetime(2023, 1, 1, 8, 0, 0),  # Simulation start time
+        "step_seconds": 60,  # 1 minute per step
+        "svi_speed_penalty": 0.5,
+        "max_svi_start_delay_s": 1800,  # 30 minutes max delay
+        "base_patience_s": 300,  # 5 minutes base patience
+        "graphml_path_drive": DATA_DIR + "IDF_drive_network.graphml",
+        "graphml_path_walk": DATA_DIR + "IDF_walk_network.graphml",
+        "graphml_path_cycle": DATA_DIR + "IDF_bike_network.graphml",
+        "amenities_df": amenities_df,
+        "evacuation_area_polygon": evacuation_area_polygon,
+        "agents_df": agents_df,
+        "steps": 60,  # 60 steps = 1 hour
+    }
 
-    # Run simulation
-    print(f"Running simulation for {MAX_SIMULATION_STEPS} steps... {datetime.now()}")
-    for i in tqdm(
-        range(MAX_SIMULATION_STEPS),
-        total=MAX_SIMULATION_STEPS,
-        desc="🚨 Evacuation Simulation",
-        unit="step",
-        unit_scale=False,
-        ncols=100,
-        colour="red",
-        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] ETA: {remaining}",
-        ascii=False,
-        dynamic_ncols=True,
-        smoothing=0.1,
-        mininterval=0.5,
-        maxinterval=2.0,
-    ):
-        model.step()
+    print(f"Running simulation for {parameters['steps']} steps... {datetime.now()}")
+    start_time = time.time()
+
+    # Run the simulation
+    model, results = run_simulation(parameters)
+
+    end_time = time.time()
+    print(f"-> Simulation completed in {end_time - start_time:.2f} seconds")
+
+    # Access and analyze results
+    print("\n=== SIMULATION RESULTS ===")
+    status_counts = model.agents.status.value_counts()
+    for status, count in status_counts.items():
+        print(f"{status}: {count} agents")
+
+    # Save results
+    results.save(exp_name="evacuation_simulation")
     print("-> Simulation complete")
-
     # Process results
     print(f"Extracting results... {datetime.now()}")
     model_df = pl.DataFrame(model.datacollector.get_model_vars_dataframe())
