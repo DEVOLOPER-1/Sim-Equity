@@ -3,19 +3,165 @@
 # This module defines the core agent-based model for the evacuation simulation.
 # It has been refactored for performance, clarity, and correctness, using rustworkx
 # for graph operations and a robust state machine for agent behavior.
-
+import gc
+import time
 import warnings
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import mesa
+import networkx as nx
 import polars as pl
-import rustworkx as rx
-from haversine import haversine
+import tqdm
 from rustworkx import PathMapping
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Point
+from shapely.geometry import Polygon
 from shapely.strtree import STRtree
+
+
+class HybridGraphManager:
+    """
+    Uses NetworkX for reliable pathfinding and RustWorkX for fast spatial operations
+    """
+
+    def __init__(self, graphml_path: str):
+        print("🔄 Loading graphs in hybrid mode...")
+        start = time.time()
+
+        # Load NetworkX for pathfinding (reliable)
+        self.nx_graph = nx.read_graphml(graphml_path)
+        print(f"   NetworkX loaded: {self.nx_graph.number_of_nodes()} nodes")
+
+        # Convert numeric attributes to floats
+        self._convert_numeric_attributes()
+
+        # Build spatial index from NetworkX data (fast spatial queries)
+        self._build_spatial_index()
+
+        load_time = time.time() - start
+        print(f"✅ Hybrid graphs loaded in {load_time:.2f}s")
+
+    def _convert_numeric_attributes(self):
+        """Convert known numeric attributes to floats"""
+        # Convert node attributes
+        for node, data in self.nx_graph.nodes(data=True):
+            for attr in ["x", "y"]:
+                if attr in data and isinstance(data[attr], str):
+                    try:
+                        data[attr] = float(data[attr])
+                    except ValueError:
+                        pass
+
+        # Convert edge attributes
+        for u, v, data in self.nx_graph.edges(data=True):
+            for attr in ["length", "capacity", "weight"]:
+                if attr in data and isinstance(data[attr], str):
+                    try:
+                        data[attr] = float(data[attr])
+                    except ValueError:
+                        pass
+
+    def _build_spatial_index(self):
+        """Build STRtree spatial index from NetworkX node coordinates"""
+        print("   Building spatial index from NetworkX data...")
+
+        nodes_with_coords = []
+        points = []
+
+        for node_id, data in self.nx_graph.nodes(data=True):
+            if "x" in data and "y" in data:
+                try:
+                    x, y = float(data["x"]), float(data["y"])
+                    points.append(Point(x, y))
+                    nodes_with_coords.append(node_id)
+                except (ValueError, TypeError):
+                    continue
+
+        self.spatial_index = STRtree(points)
+        self.spatial_node_mapping = {
+            i: node_id for i, node_id in enumerate(nodes_with_coords)
+        }
+        print(f"   Spatial index built with {len(points)} nodes")
+
+    def get_nearest_node(self, pos: tuple) -> Optional[int]:
+        """Fast spatial search using STRtree"""
+        if pos is None:
+            return None
+
+        try:
+            # pos = (lat, lon), Point expects (lon, lat)
+            target_point = Point(pos[1], pos[0])
+            nearest_idx = self.spatial_index.nearest(target_point)
+
+            if nearest_idx is not None:
+                return self.spatial_node_mapping[nearest_idx]
+
+        except Exception:
+            # Fallback to manual search
+            return self._manual_nearest_node(pos)
+
+        return None
+
+    def _manual_nearest_node(self, pos: tuple) -> Optional[int]:
+        """Fallback manual search"""
+        from haversine import haversine
+
+        target_lat, target_lon = float(pos[0]), float(pos[1])
+        min_distance = float("inf")
+        nearest_node = None
+
+        for node_id, data in self.nx_graph.nodes(data=True):
+            if "x" in data and "y" in data:
+                try:
+                    node_lon = float(data["x"])
+                    node_lat = float(data["y"])
+
+                    distance = haversine(
+                        (target_lat, target_lon),
+                        (node_lat, node_lon),
+                        normalize=True,
+                        check=True,
+                    )
+
+                    if distance < min_distance:
+                        min_distance = distance
+                        nearest_node = node_id
+
+                except (ValueError, TypeError):
+                    continue
+
+        return nearest_node
+
+    def find_shortest_path(
+        self, source: int, target: int, weight="length"
+    ) -> List[int]:
+        """Reliable pathfinding using NetworkX"""
+        try:
+            path = nx.shortest_path(
+                self.nx_graph, source=source, target=target, weight=weight
+            )
+            return path
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            return []
+
+    def get_edge_data(self, u: int, v: int) -> Optional[dict]:
+        """Get edge attributes from NetworkX"""
+        try:
+            return self.nx_graph[u][v]
+        except KeyError:
+            return None
+
+    def node_exists(self, node_id: int) -> bool:
+        """Check if node exists in graph"""
+        return node_id in self.nx_graph
+
+    def get_node_data(self, node_id: int) -> Optional[dict]:
+        """Get node attributes"""
+        try:
+            return self.nx_graph.nodes[node_id]
+        except KeyError:
+            return None
 
 
 # --- AGENT DEFINITION ---
@@ -45,7 +191,7 @@ class EvacuationAgent(mesa.Agent):
             # Find the starting node on the graph; fail the agent if none is found.
             self.current_pos_node = self.model.get_nearest_node(
                 self.start_pos,
-                self.main_mode,  # TODO: /home/youssef_mohammad/projects/Sim-Equity/simulation/model/evacuation_model.py:50: UserWarning: Agent 42_0299: Could not find a valid starting node on the graph.
+                self.main_mode,
             )
             if self.current_pos_node is None:
                 warnings.warn(
@@ -165,8 +311,8 @@ class EvacuationAgent(mesa.Agent):
             self, self.current_pos_node, self.target_node
         )
 
-        if self.path:  # and len(self.path) >= 2:
-            self.status = "EVACUATING"  # TODO: START INVESTIGATION FROM HERE & TEST PLAN ROUTE SPEPARATELT IN T.PY
+        if self.path:
+            self.status = "EVACUATING"
             self.time_on_current_edge_s = 0.0  # Reset edge timer for the new path
         else:
             warnings.warn(
@@ -185,7 +331,7 @@ class EvacuationAgent(mesa.Agent):
         u, v = self.path[0], self.path[1]
 
         # Get edge data using the correct rustworkx method
-        graph = self.model.get_graph_for_mode(self.main_mode)
+        graph = self.model.hybrid_managers[self.main_mode]
         edge_data = graph.get_edge_data(u, v)
         if edge_data is None:
             warnings.warn(
@@ -226,6 +372,9 @@ class EvacuationAgent(mesa.Agent):
 
 # --- MODEL DEFINITION ---
 
+# FILE: evacuation_model.py
+# ... (keep all imports and HybridGraphManager class as is)
+
 
 class EvacuationModel(mesa.Model):
     """
@@ -236,9 +385,9 @@ class EvacuationModel(mesa.Model):
     def __init__(
         self,
         agents_df: pl.DataFrame,
-        G_drive: rx.PyDiGraph,
-        G_walk: rx.PyDiGraph,
-        G_cycle: rx.PyDiGraph,
+        graphml_path_drive: str,
+        graphml_path_walk: str,
+        graphml_path_cycle: str,
         amenities_df: pl.DataFrame,
         evacuation_area_polygon: Polygon,
         start_datetime: datetime,
@@ -248,6 +397,9 @@ class EvacuationModel(mesa.Model):
         base_patience_s: int = 300,
     ):
         super().__init__()
+        print("🚀 Initializing EvacuationModel...")
+        init_start = time.time()
+
         self.start_datetime = start_datetime
         self.sim_time = start_datetime
         self.step_seconds = step_seconds
@@ -258,22 +410,51 @@ class EvacuationModel(mesa.Model):
         self.base_patience_s = base_patience_s
 
         # Environment data
-        self.evac_polygon = evacuation_area_polygon
-        self.graphs = {"DRIVE": G_drive, "WALKING": G_walk, "BIKE": G_cycle}
+        print("📊 Setting up hybrid graph managers...")
+        self.hybrid_managers = {
+            "CAR": HybridGraphManager(graphml_path_drive),
+            "WALKING": HybridGraphManager(graphml_path_walk),
+            "BIKE": HybridGraphManager(graphml_path_cycle),
+        }
+        print("✅ Hybrid graph managers created")
 
-        # Pre-build spatial indexes for fast nearest-node lookups
-        self._build_spatial_indexes()
+        # Environment data
+        self.evac_polygon = evacuation_area_polygon
 
         # Pre-compute and cache the locations of safe shelters
+        print("🏠 Pre-computing shelter nodes...")
+        shelter_start = time.time()
         self.shelter_nodes = self._precompute_shelter_nodes(amenities_df)
+        shelter_time = time.time() - shelter_start
+        print(f"✅ Shelter nodes computed in {shelter_time:.2f}s")
 
         # Agent scheduling
-        for agent_data in agents_df.iter_rows(named=True):
+        print("👥 Creating agents...")
+        agent_start = time.time()
+        agent_count = 0
+        failed_agents = 0
+
+        for agent_data in tqdm.tqdm(
+            agents_df.iter_rows(named=True),
+            total=agents_df.shape[0],
+            desc="Agents Creation",
+        ):
             agent_id = agent_data.get("ID")
             if agent_id:
                 EvacuationAgent(model=self, unique_id=str(agent_id), **agent_data)
+                # EvacuationAgent(model=self, unique_id=str(agent_id), **agent_data)
+                agent_count += 1
+
+                if agent_count % 10000 == 0:
+                    print(f"   Created {agent_count:,} agents...")
+
+        agent_time = time.time() - agent_start
+        print(
+            f"✅ Created {agent_count:,} agents ({failed_agents} failed) in {agent_time:.2f}s"
+        )
 
         # Bottleneck monitoring and data collection
+        print("📈 Setting up data collection...")
         self.edge_load = defaultdict(int)
         self.edge_agents = defaultdict(list)
         self.bottleneck_log: List[Dict[str, Any]] = []
@@ -287,32 +468,22 @@ class EvacuationModel(mesa.Model):
                 "current_node": "current_pos_node",
             },
         )
-        print(f"Model instantiated with {self.agents.__len__()} agents.")
 
-    def _build_spatial_indexes(self):
-        """Creates high-performance STRtree spatial indexes for each network graph."""
-        self.spatial_indexes = {}
-        self.node_id_maps = {}  # Maps STRtree index back to rustworkx node index
-        for mode, graph in self.graphs.items():
-            node_indices = list(graph.node_indices())
-            points = [
-                Point(graph[node_id]["x"], graph[node_id]["y"])
-                for node_id in node_indices
-            ]
-            self.spatial_indexes[mode] = STRtree(points)
-            # Create a mapping from the STRtree's sequential index to the actual node ID
-            self.node_id_maps[mode] = {
-                i: node_id for i, node_id in enumerate(node_indices)
-            }
-        print("Spatial indexes built successfully.")
+        total_time = time.time() - init_start
+        print(f"🎉 Model initialization complete in {total_time:.2f}s")
+        print(f"📊 Final stats: {len(self.agents):,} agents, {failed_agents} failed")
 
     def _precompute_shelter_nodes(self, amenities_df: pl.DataFrame) -> Dict[str, set]:
-        """Finds nearest graph nodes for all out-of-bounds amenities sequentially."""
-        shelters = {mode: set() for mode in self.graphs.keys()}
+        """OPTIMIZED: Finds nearest graph nodes for all out-of-bounds amenities using spatial indexes."""
+        shelters = {mode: set() for mode in self.hybrid_managers.keys()}
         if amenities_df.is_empty():
+            print("   No amenities data provided")
             return shelters
 
+        print(f"   Processing {len(amenities_df):,} amenities...")
+
         # Filter amenities to only those outside the evacuation zone
+        filter_start = time.time()
         safe_amenities = amenities_df.filter(
             ~pl.struct(["latitude", "longitude"]).map_elements(
                 lambda pos: self.is_pos_in_evacuation_area(
@@ -321,38 +492,86 @@ class EvacuationModel(mesa.Model):
                 return_dtype=pl.Boolean,
             )
         )
+        filter_time = time.time() - filter_start
+        print(
+            f"   Filtered to {len(safe_amenities):,} safe amenities in {filter_time:.2f}s"
+        )
 
-        # Process each amenity sequentially for each mode
+        # Process each amenity using optimized spatial search
+        process_start = time.time()
+        processed_count = 0
+
         for row in safe_amenities.iter_rows(named=True):
             pos = (row["latitude"], row["longitude"])
             for mode in shelters.keys():
-                node = self.get_nearest_node(pos, mode)
+                manager = self.hybrid_managers[mode]
+                node = manager.get_nearest_node(pos)
                 if node is not None:
                     shelters[mode].add(node)
 
-        print(
-            f"Pre-computed {sum(len(s) for s in shelters.values())} shelter node locations."
-        )
+            processed_count += 1
+            if processed_count % 1000 == 0:
+                elapsed = time.time() - process_start
+                rate = processed_count / elapsed
+                remaining = len(safe_amenities) - processed_count
+                eta = remaining / rate if rate > 0 else 0
+                print(
+                    f"   Processed {processed_count:,}/{len(safe_amenities):,} amenities "
+                    f"({rate:.1f}/s, ETA: {eta:.1f}s)"
+                )
+
+        process_time = time.time() - process_start
+        total_shelters = sum(len(s) for s in shelters.values())
+        print(f"   Completed processing in {process_time:.2f}s")
+        print(f"   Found {total_shelters:,} unique shelter locations across all modes")
+
         return shelters
+
+    def get_nearest_node(self, pos: tuple, mode: str) -> Optional[int]:
+        """Public interface - uses HybridGraphManager for nearest node lookup."""
+        mode = self._normalize_mode(mode)
+        manager = self.hybrid_managers.get(mode)
+        return manager.get_nearest_node(pos) if manager else None
 
     def step(self):
         """Advance the model by one time step."""
+        step_start = time.time()
+
         self.edge_load.clear()
         self.edge_agents.clear()
         self.bottleneck_log = []
 
         self.sim_time += timedelta(seconds=self.step_seconds)
+
+        # Count agent statuses for monitoring
+        status_counts = defaultdict(int)
+        # for agent in self.agents:
+        #     status_counts[agent.status] += 1
+
         self.agents.shuffle_do("step")
         self._analyze_and_log_bottlenecks()
         self.datacollector.collect(self)
+
+        step_time = time.time() - step_start
+
+        print(
+            f"⏰ Step : {step_time:.3f}s | "
+            f"Active: {status_counts['EVACUATING']}, "
+            f"Planning: {status_counts['PLANNING']}, "
+            f"Arrived: {status_counts['ARRIVED']}, "
+            f"Failed: {status_counts['FAILED']}, "
+            f"Inactive: {status_counts['INACTIVE']}"
+        )
 
     def _analyze_and_log_bottlenecks(self):
         """Iterates through road usage and logs congested edges."""
         for edge, load in self.edge_load.items():
             u, v = edge
             try:
-                edge_data = self.graphs["DRIVE"].get_edge_data(u, v)
-                capacity = edge_data.get("capacity", 20)  # Default capacity
+                # Use CAR manager for edge data
+                manager = self.hybrid_managers["CAR"]
+                edge_data = manager.get_edge_data(u, v)
+                capacity = edge_data.get("capacity", 20) if edge_data else 20
 
                 if load > capacity:
                     avg_svi = sum(a.svi for a in self.edge_agents[edge]) / load
@@ -371,115 +590,86 @@ class EvacuationModel(mesa.Model):
 
     # --- HELPER METHODS (API FOR AGENTS) ---
 
-    def get_nearest_node(self, pos: tuple, mode: str) -> Optional[int]:
-        """Finds the nearest node using manual distance calculation with haversine."""
-        if pos is None:
-            return None
-
-        mode = mode.upper()
-        graph = self.get_graph_for_mode(mode)
-
-        if not graph.node_indices():
-            return None
-
-        # Extract target coordinates - pos is (lat, lon)
-        target_lat, target_lon = float(pos[0]), float(pos[1])
-
-        nearest_node_index = None
-        min_distance = float("inf")
-
-        for node_index in graph.node_indices():
-            try:
-                node_data = graph[node_index]
-
-                # Graph stores coordinates as x=longitude, y=latitude
-                node_lon = float(node_data.get("x", 0.0))
-                node_lat = float(node_data.get("y", 0.0))
-
-                # Calculate haversine distance between (lat, lon) points
-                distance = haversine(
-                    (target_lat, target_lon),
-                    (node_lat, node_lon),
-                    normalize=True,
-                    check=True,
-                )
-
-                if distance < min_distance:
-                    min_distance = distance
-                    nearest_node_index = node_index
-
-            except (KeyError, ValueError, TypeError) as e:
-                # Skip nodes with invalid coordinate data
-                continue
-
-        return nearest_node_index
-
     def is_pos_in_evacuation_area(self, pos: tuple) -> bool:
         """Checks if a (lat, lon) point is inside the evacuation polygon."""
         return self.evac_polygon.contains(Point(pos[1], pos[0])) if pos else False
 
     def get_nearest_shelter_node(self, source_node: int, mode: str) -> Optional[int]:
         """Finds the closest pre-computed shelter to an agent's current node."""
-        mode = mode.upper()
+        mode = self._normalize_mode(mode)
         shelters = self.shelter_nodes.get(mode)
         if not shelters or source_node is None:
             return None
 
-        graph = self.get_graph_for_mode(mode)
+        manager = self.hybrid_managers.get(mode)
+        if not manager:
+            return None
 
         try:
-            # Get distances to all shelter nodes
-            distances = rx.dijkstra_shortest_path_lengths(
-                graph,
-                node=source_node,
-                edge_cost_fn=lambda e: float(e.get("length", 1.0)),
-            )
+            # Get distances to all shelter nodes using NetworkX
+            distances = {}
+            for shelter in shelters:
+                try:
+                    path_length = nx.shortest_path_length(
+                        manager.nx_graph,
+                        source=source_node,
+                        target=shelter,
+                        weight="length",
+                    )
+                    distances[shelter] = path_length
+                except nx.NetworkXNoPath:
+                    continue
 
-            # Find reachable shelters and their distances
-            reachable_shelters = {
-                shelter: distances[shelter]
-                for shelter in shelters
-                if shelter in distances
-            }
-
-            if not reachable_shelters:
+            if not distances:
                 return None
 
             # Return the shelter with minimum distance
-            return min(reachable_shelters, key=reachable_shelters.get)
+            return min(distances.items(), key=lambda x: x[1])[0]
 
-        except (rx.NoPathFound, KeyError):
+        except Exception:
             return None
 
     def plan_route(
         self, agent: EvacuationAgent, source_node: int, target_node: int
-    ) -> PathMapping | list[Any]:
-        """Calculates the shortest path using Dijkstra, considering dynamic traffic."""
-        graph = self.get_graph_for_mode(agent.main_mode)
+    ) -> list:
+        """Calculates the shortest path using HybridGraphManager, considering dynamic traffic."""
+        mode = self._normalize_mode(agent.main_mode)
+        manager = self.hybrid_managers.get(mode)
+        if not manager:
+            return []
+
         agent_speed = max(agent.speed_m_s, 0.1)
 
-        def dynamic_weight_fn(edge_data: dict) -> float:
-            """A custom weight function for pathfinding that represents travel time."""
-            base_travel_time = float(edge_data.get("length", 1.0)) / float(agent_speed)
+        # For car agents, apply congestion penalty
+        if mode == "CAR":
+            # Create a copy of the graph to modify weights temporarily
+            graph = manager.nx_graph.copy()
 
-            # Only apply congestion penalty for cars
-            if agent.main_mode != "WALKING" and agent.main_mode != "BIKE":
-                u, v = edge_data["source"], edge_data["target"]
+            # Apply dynamic weights based on congestion
+            for u, v, data in graph.edges(data=True):
+                try:
+                    # Safely convert length to float
+                    base_length = float(data.get("length", 1.0))
+                except (ValueError, TypeError):
+                    base_length = 1.0
+
+                base_travel_time = base_length / agent_speed
+
+                # Get congestion for this edge
                 congestion = self.get_edge_congestion((u, v))
                 penalty_factor = 2**congestion  # Exponential penalty
-                return base_travel_time * penalty_factor
+                data["dynamic_weight"] = base_travel_time * penalty_factor
 
-            return base_travel_time
-
+            weight = "dynamic_weight"
+        else:
+            graph = manager.nx_graph
+            weight = "length"
+        gc.collect()
         try:
-            path = rx.dijkstra_shortest_paths(
-                graph,
-                source=source_node,
-                target=target_node,
-                weight_fn=dynamic_weight_fn,
+            return nx.shortest_path(
+                graph, source=source_node, target=target_node, weight=weight
             )
-            return path
-        except (rx.NoPathFound, KeyError):
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
             return []
 
     def report_edge_usage(self, agent: EvacuationAgent, edge: tuple):
@@ -496,13 +686,23 @@ class EvacuationModel(mesa.Model):
 
         try:
             u, v = edge
-            edge_data = self.graphs["DRIVE"].get_edge_data(u, v)
-            capacity = edge_data.get("capacity", 20)
+            manager = self.hybrid_managers["CAR"]
+            edge_data = manager.get_edge_data(u, v)
+            capacity = edge_data.get("capacity", 20) if edge_data else 20
             return load / capacity
         except (KeyError, TypeError, ZeroDivisionError):
             return 0.0
 
-    def get_graph_for_mode(self, mode: str) -> rx.PyDiGraph:
-        """Returns the appropriate graph for the given transportation mode."""
+    def _normalize_mode(self, mode: str) -> str:
+        """Normalize transportation mode to standard keys."""
         mode = mode.upper()
-        return self.graphs.get(mode, "CAR")  # Default to walking
+        mode_mapping = {
+            "CAR": "CAR",
+            "DRIVE": "CAR",
+            "WALKING": "WALKING",
+            "WALK": "WALKING",
+            "BIKE": "BIKE",
+            "BICYCLE": "BIKE",
+            "CYCLING": "BIKE",
+        }
+        return mode_mapping.get(mode, "WALKING")

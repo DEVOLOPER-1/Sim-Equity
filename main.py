@@ -3,7 +3,6 @@ import gc
 from datetime import datetime
 
 import polars as pl
-import rustworkx as rx
 from tqdm import tqdm
 
 from simulation.model.agents_model_initializer import AgentsGatherer
@@ -54,10 +53,10 @@ def main():
     print(f"-> Found {agents_df.shape[0]} agents {datetime.now()}")
 
     # Load graphs
-    print(f"Loading network graphs... {datetime.now()}")
-    G_drive = rx.read_graphml(DATA_DIR + "IDF_drive_network.graphml")[0]
-    G_walk = rx.read_graphml(DATA_DIR + "IDF_walk_network.graphml")[0]
-    G_cycle = rx.read_graphml(DATA_DIR + "IDF_bike_network.graphml")[0]
+    # print(f"Loading network graphs... {datetime.now()}")
+    # G_drive = rx.read_graphml()[0]
+    # G_walk = rx.read_graphml()[0]
+    # G_cycle = rx.read_graphml()[0]
 
     # Load amenities
     amenities_df = pl.read_csv(DATA_DIR + "idf_amenities.csv")
@@ -69,9 +68,9 @@ def main():
     print(f"Instantiating model... {datetime.now()}")
     model = EvacuationModel(
         agents_df=agents_df,
-        G_drive=G_drive,
-        G_walk=G_walk,
-        G_cycle=G_cycle,
+        graphml_path_drive=(DATA_DIR + "IDF_drive_network.graphml"),
+        graphml_path_walk=DATA_DIR + "IDF_walk_network.graphml",
+        graphml_path_cycle=DATA_DIR + "IDF_bike_network.graphml",
         amenities_df=amenities_df,
         evacuation_area_polygon=evacuation_area_polygon,
         start_datetime=SCENARIO_START_DATETIME,
@@ -105,7 +104,7 @@ def main():
     analytics.analyze_svi_vs_outcome()
     analytics.plot_svi_vs_evacuation_time(save=True)
     analytics.plot_equity_gap(save=True)
-    analytics.plot_bottleneck_map(G_drive, save=True)
+    analytics.plot_bottleneck_map(model.hybrid_managers["CAR"], save=True)
 
     print(f"--- ANALYSIS COMPLETE --- {datetime.now()}")
 
