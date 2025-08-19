@@ -6,13 +6,14 @@
 
 import warnings
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import mesa
 import polars as pl
 import rustworkx as rx
+from haversine import haversine
+from rustworkx import PathMapping
 from shapely.geometry import Point, Polygon
 from shapely.strtree import STRtree
 
@@ -27,7 +28,8 @@ class EvacuationAgent(mesa.Agent):
     """
 
     def __init__(self, model: mesa.Model, unique_id: str, **kwargs):
-        super().__init__(unique_id, model)
+        super().__init__(model)
+        self.unique_id: str = unique_id
         self.status = "INACTIVE"  # State machine: INACTIVE -> PLANNING -> EVACUATING -> (ARRIVED | FAILED)
         self.svi = float(kwargs.get("SVI_normalized", 0.0))
         self.main_mode = kwargs.get("main_mode", "WALKING")
@@ -42,7 +44,8 @@ class EvacuationAgent(mesa.Agent):
         if self.start_pos:
             # Find the starting node on the graph; fail the agent if none is found.
             self.current_pos_node = self.model.get_nearest_node(
-                self.start_pos, self.main_mode
+                self.start_pos,
+                self.main_mode,  # TODO: /home/youssef_mohammad/projects/Sim-Equity/simulation/model/evacuation_model.py:50: UserWarning: Agent 42_0299: Could not find a valid starting node on the graph.
             )
             if self.current_pos_node is None:
                 warnings.warn(
@@ -158,10 +161,12 @@ class EvacuationAgent(mesa.Agent):
             return
 
         # Calculate the path using the model's pathfinding service.
-        self.path = self.model.plan_route(self, self.current_pos_node, self.target_node)
+        self.path: PathMapping = self.model.plan_route(
+            self, self.current_pos_node, self.target_node
+        )
 
-        if self.path and len(self.path) >= 2:
-            self.status = "EVACUATING"
+        if self.path:  # and len(self.path) >= 2:
+            self.status = "EVACUATING"  # TODO: START INVESTIGATION FROM HERE & TEST PLAN ROUTE SPEPARATELT IN T.PY
             self.time_on_current_edge_s = 0.0  # Reset edge timer for the new path
         else:
             warnings.warn(
@@ -289,16 +294,20 @@ class EvacuationModel(mesa.Model):
         self.spatial_indexes = {}
         self.node_id_maps = {}  # Maps STRtree index back to rustworkx node index
         for mode, graph in self.graphs.items():
-            points = [Point(data["x"], data["y"]) for _, data in graph.nodes()]
+            node_indices = list(graph.node_indices())
+            points = [
+                Point(graph[node_id]["x"], graph[node_id]["y"])
+                for node_id in node_indices
+            ]
             self.spatial_indexes[mode] = STRtree(points)
             # Create a mapping from the STRtree's sequential index to the actual node ID
             self.node_id_maps[mode] = {
-                i: node_id for i, node_id in enumerate(graph.node_indices())
+                i: node_id for i, node_id in enumerate(node_indices)
             }
         print("Spatial indexes built successfully.")
 
     def _precompute_shelter_nodes(self, amenities_df: pl.DataFrame) -> Dict[str, set]:
-        """Finds nearest graph nodes for all out-of-bounds amenities in parallel."""
+        """Finds nearest graph nodes for all out-of-bounds amenities sequentially."""
         shelters = {mode: set() for mode in self.graphs.keys()}
         if amenities_df.is_empty():
             return shelters
@@ -313,21 +322,13 @@ class EvacuationModel(mesa.Model):
             )
         )
 
-        tasks = [
-            (row["latitude"], row["longitude"], mode)
-            for row in safe_amenities.iter_rows(named=True)
-            for mode in shelters.keys()
-        ]
-
-        with ThreadPoolExecutor() as executor:
-            results = list(
-                executor.map(lambda p: self.get_nearest_node(p[:2], p[2]), tasks)
-            )
-
-        for i, node in enumerate(results):
-            if node is not None:
-                _, _, mode = tasks[i]
-                shelters[mode].add(node)
+        # Process each amenity sequentially for each mode
+        for row in safe_amenities.iter_rows(named=True):
+            pos = (row["latitude"], row["longitude"])
+            for mode in shelters.keys():
+                node = self.get_nearest_node(pos, mode)
+                if node is not None:
+                    shelters[mode].add(node)
 
         print(
             f"Pre-computed {sum(len(s) for s in shelters.values())} shelter node locations."
@@ -370,21 +371,48 @@ class EvacuationModel(mesa.Model):
 
     # --- HELPER METHODS (API FOR AGENTS) ---
 
-    def get_graph_for_mode(self, mode: str) -> rx.PyDiGraph:
-        return self.graphs.get(mode.upper(), self.graphs["WALKING"])
-
     def get_nearest_node(self, pos: tuple, mode: str) -> Optional[int]:
-        """Finds the nearest node on the appropriate graph for a given lat/lon."""
+        """Finds the nearest node using manual distance calculation with haversine."""
         if pos is None:
             return None
-        mode = mode.upper()
-        point = Point(pos[1], pos[0])  # Shapely uses (lon, lat)
 
-        try:
-            tree_index = self.spatial_indexes[mode].nearest(point)
-            return self.node_id_maps[mode][tree_index]
-        except (KeyError, IndexError):
+        mode = mode.upper()
+        graph = self.get_graph_for_mode(mode)
+
+        if not graph.node_indices():
             return None
+
+        # Extract target coordinates - pos is (lat, lon)
+        target_lat, target_lon = float(pos[0]), float(pos[1])
+
+        nearest_node_index = None
+        min_distance = float("inf")
+
+        for node_index in graph.node_indices():
+            try:
+                node_data = graph[node_index]
+
+                # Graph stores coordinates as x=longitude, y=latitude
+                node_lon = float(node_data.get("x", 0.0))
+                node_lat = float(node_data.get("y", 0.0))
+
+                # Calculate haversine distance between (lat, lon) points
+                distance = haversine(
+                    (target_lat, target_lon),
+                    (node_lat, node_lon),
+                    normalize=True,
+                    check=True,
+                )
+
+                if distance < min_distance:
+                    min_distance = distance
+                    nearest_node_index = node_index
+
+            except (KeyError, ValueError, TypeError) as e:
+                # Skip nodes with invalid coordinate data
+                continue
+
+        return nearest_node_index
 
     def is_pos_in_evacuation_area(self, pos: tuple) -> bool:
         """Checks if a (lat, lon) point is inside the evacuation polygon."""
@@ -399,42 +427,43 @@ class EvacuationModel(mesa.Model):
 
         graph = self.get_graph_for_mode(mode)
 
-        # This can still be slow. A better approach for massive simulations
-        # would be to pre-calculate paths from all nodes, but this is a robust compromise.
         try:
-            paths = rx.dijkstra_shortest_paths(
+            # Get distances to all shelter nodes
+            distances = rx.dijkstra_shortest_path_lengths(
                 graph,
-                source=source_node,
-                target=list(shelters),
-                weight_fn=lambda e: float(e.get("length", 1.0)),
+                node=source_node,
+                edge_cost_fn=lambda e: float(e.get("length", 1.0)),
             )
-            # Find the target with the shortest path among all reachable shelters
+
+            # Find reachable shelters and their distances
             reachable_shelters = {
-                target: path for target, path in paths.items() if path
+                shelter: distances[shelter]
+                for shelter in shelters
+                if shelter in distances
             }
+
             if not reachable_shelters:
                 return None
 
-            closest_target = min(
-                reachable_shelters, key=lambda t: len(reachable_shelters[t])
-            )
-            return closest_target
+            # Return the shelter with minimum distance
+            return min(reachable_shelters, key=reachable_shelters.get)
+
         except (rx.NoPathFound, KeyError):
             return None
 
     def plan_route(
         self, agent: EvacuationAgent, source_node: int, target_node: int
-    ) -> list:
+    ) -> PathMapping | list[Any]:
         """Calculates the shortest path using Dijkstra, considering dynamic traffic."""
         graph = self.get_graph_for_mode(agent.main_mode)
         agent_speed = max(agent.speed_m_s, 0.1)
 
         def dynamic_weight_fn(edge_data: dict) -> float:
             """A custom weight function for pathfinding that represents travel time."""
-            base_travel_time = edge_data.get("length", 1.0) / agent_speed
+            base_travel_time = float(edge_data.get("length", 1.0)) / float(agent_speed)
 
             # Only apply congestion penalty for cars
-            if agent.main_mode == "CAR":
+            if agent.main_mode != "WALKING" and agent.main_mode != "BIKE":
                 u, v = edge_data["source"], edge_data["target"]
                 congestion = self.get_edge_congestion((u, v))
                 penalty_factor = 2**congestion  # Exponential penalty
@@ -449,7 +478,7 @@ class EvacuationModel(mesa.Model):
                 target=target_node,
                 weight_fn=dynamic_weight_fn,
             )
-            return list(path)
+            return path
         except (rx.NoPathFound, KeyError):
             return []
 
@@ -472,3 +501,8 @@ class EvacuationModel(mesa.Model):
             return load / capacity
         except (KeyError, TypeError, ZeroDivisionError):
             return 0.0
+
+    def get_graph_for_mode(self, mode: str) -> rx.PyDiGraph:
+        """Returns the appropriate graph for the given transportation mode."""
+        mode = mode.upper()
+        return self.graphs.get(mode, "CAR")  # Default to walking
