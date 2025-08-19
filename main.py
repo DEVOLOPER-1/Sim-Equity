@@ -16,6 +16,7 @@ def main():
     SCENARIO_CENTER_LAT = 48.858844
     SCENARIO_CENTER_LON = 2.347012
     SCENARIO_RADIUS_KM = 50.0
+    MAX_SIMULATION_STEPS = 60
     DATA_DIR = "simulation/maps_data/osmnx_layers/"
 
     print(f"--- SIMULATION STARTING --- {datetime.now()}")
@@ -71,10 +72,11 @@ def main():
         "amenities_df": amenities_df,
         "evacuation_area_polygon": evacuation_area_polygon,
         "agents_df": agents_df,
-        "steps": 60,  # 60 steps = 1 hour
+        "steps": MAX_SIMULATION_STEPS,  # 60 steps = 1 hour
     }
 
-    print(f"Running simulation for {parameters['steps']} steps... {datetime.now()}")
+    # Access and analyze results
+    print(f"Running simulation for {MAX_SIMULATION_STEPS} steps... {datetime.now()}")
     start_time = time.time()
 
     # Run the simulation
@@ -85,9 +87,24 @@ def main():
 
     # Access and analyze results
     print("\n=== SIMULATION RESULTS ===")
-    status_counts = model.agents.status.value_counts()
+
+    # Count agent statuses
+    from collections import Counter
+
+    status_counts = Counter(agent.status for agent in model.agents)
+
+    # Also count failure reasons if needed
+    fail_reasons = Counter(
+        agent.fail_reason for agent in model.agents if agent.status == "FAILED"
+    )
+
     for status, count in status_counts.items():
         print(f"{status}: {count} agents")
+
+    if fail_reasons:
+        print("\nFailure reasons:")
+        for reason, count in fail_reasons.items():
+            print(f"  {reason}: {count} agents")
 
     # Save results
     results.save(exp_name="evacuation_simulation")

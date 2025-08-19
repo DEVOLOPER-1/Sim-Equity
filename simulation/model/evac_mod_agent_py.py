@@ -27,54 +27,99 @@ class EvacuationAgent(ap.Agent):
     vulnerability, assets, and behavioral parameters.
     """
 
-    def setup(self):
-        """Initialize agent properties."""
-        self.status = "INACTIVE"  # State machine: INACTIVE -> PLANNING -> EVACUATING -> (ARRIVED | FAILED)
-        self.svi = float(self.p.get("SVI_normalized", 0.0))
-        self.main_mode = self.p.get("main_mode", "WALKING")
+    def setup(self, **kwargs):
+        """Initialize agent properties with individual data."""
+        # Store any individual agent data passed during setup
+        if kwargs:
+            self.agent_data = kwargs
+            # Update self.p with individual agent data
+            self.p.update(kwargs)
+        else:
+            self.agent_data = {}
 
-        # Location handling
+        self.status = "INACTIVE"
+
+        # Access agent-specific data (try both self.p and self.agent_data)
+        self.svi = float(self._get_param("SVI_normalized", 0.0))
+        self.main_mode = self._get_param("main_mode", "WALKING")
+
+        # Location handling with better error checking
         self.home_location = self._get_location(
             "home_location_lat", "home_location_lon"
         )
         self.start_pos = self._get_location("start_lat", "start_lon")
         self.current_pos_node = None
 
-        if self.start_pos:
-            # Find the starting node on the graph
-            self.current_pos_node = self.model.get_nearest_node(
-                self.start_pos, self.main_mode
-            )
-            if self.current_pos_node is None:
-                warnings.warn(
-                    f"Agent {self.id}: Could not find a valid starting node on the graph."
-                )
-                self.status = "FAILED"
-        else:
-            warnings.warn(f"Agent {self.id}: Missing start_lat or start_lon.")
-            self.status = "FAILED"
+        # Debug print to check what we're getting
+        print(
+            f"Agent {self.id}: start_pos = {self.start_pos}, home_location = {self.home_location}"
+        )
+        print(f"Agent {self.id}: Available params: {list(self.p.keys())}")
 
-        # Routing state
+        # Check if we have valid location data
+        if self.start_pos is None:
+            self.status = "FAILED"
+            self.fail_reason = "Missing location data"
+            return  # Skip further initialization
+
+        # Find the starting node on the graph
+        self.current_pos_node = self.model.get_nearest_node(
+            self.start_pos, self.main_mode
+        )
+        if self.current_pos_node is None:
+            self.status = "FAILED"
+            self.fail_reason = "Could not find valid starting node on graph"
+            return  # Skip further initialization
+
+        # Rest of the initialization...
         self.target_node = None
         self.path = []
         self.time_on_current_edge_s = 0.0
         self.replan_attempts = 0
         self.MAX_REPLAN_ATTEMPTS = 5
+        self.fail_reason = None  # Track why agent failed
 
         # Time management and SVI-driven behavior
         self._init_behavioral_params()
+
+    def _get_param(self, key, default=None):
+        """Get parameter from agent data with fallback."""
+        # First try individual agent data, then model parameters
+        if hasattr(self, "agent_data") and key in self.agent_data:
+            return self.agent_data[key]
+        return self.p.get(key, default)
 
     def _get_location(
         self, lat_key: str, lon_key: str
     ) -> Optional[Tuple[float, float]]:
         """Safely extract and validate location coordinates from agent parameters."""
-        lat, lon = self.p.get(lat_key), self.p.get(lon_key)
-        return (float(lat), float(lon)) if lat is not None and lon is not None else None
+        lat = self._get_param(lat_key)
+        lon = self._get_param(lon_key)
+
+        try:
+            if lat is not None and lon is not None:
+                lat_float = float(lat)
+                lon_float = float(lon)
+
+                # Basic sanity check for coordinates
+                if -90 <= lat_float <= 90 and -180 <= lon_float <= 180:
+                    return (lat_float, lon_float)
+                else:
+                    print(f"Invalid coordinates: lat={lat_float}, lon={lon_float}")
+                    return None
+            else:
+                print(f"Missing coordinates: lat={lat}, lon={lon}")
+                return None
+        except (ValueError, TypeError) as e:
+            print(
+                f"Error converting coordinates to float: lat={lat}, lon={lon}, error={e}"
+            )
+            return None
 
     def _init_behavioral_params(self):
         """Initialize all agent-specific timing and behavioral parameters based on SVI."""
         # 1. Reaction Delay
-        start_time_str = self.p.get("start_time")
+        start_time_str = self._get_param("start_time")
         base_activation_time = (
             datetime.fromisoformat(start_time_str)
             if start_time_str
@@ -99,12 +144,14 @@ class EvacuationAgent(ap.Agent):
     def _get_base_speed(self) -> float:
         """Get the appropriate base speed from the agent's data based on their main mode."""
         mode_speeds = {
-            "WALKING": self.p.get("walking_speed_m_s", 1.4),  # Avg. human walk speed
-            "BIKE": self.p.get("cycling_speed_m_s", 4.5),  # Avg. city cycling speed
+            "WALKING": self._get_param("walking_speed_m_s", 1.4),
+            "BIKE": self._get_param("cycling_speed_m_s", 4.5),
         }
         return float(
-            mode_speeds.get(self.main_mode.upper(), self.p.get("median_speed_m_s", 8.3))
-        )  # Default to car speed
+            mode_speeds.get(
+                self.main_mode.upper(), self._get_param("median_speed_m_s", 8.3)
+            )
+        )
 
     def update(self):
         """Executes the agent's logic for a single simulation time step."""
@@ -232,17 +279,12 @@ class EvacuationAgent(ap.Agent):
 
 
 class EvacuationModel(ap.Model):
-    """
-    The main model class for the evacuation simulation.
-    Manages the environment (graphs), agent scheduling, and data collection.
-    """
-
     def setup(self):
         """Initialize the model with parameters."""
         print("🚀 Initializing EvacuationModel...")
         init_start = time.time()
 
-        # Simulation parameters
+        # Simulation parameters (these stay in model.p)
         self.start_datetime = self.p.start_datetime
         self.sim_time = self.p.start_datetime
         self.step_seconds = self.p.step_seconds
@@ -287,24 +329,30 @@ class EvacuationModel(ap.Model):
         shelter_time = time.time() - shelter_start
         print(f"✅ Shelter nodes computed in {shelter_time:.2f}s")
 
-        # Create agents
+        # Create agents - FIXED VERSION using AgentPy's built-in parameter passing
         print("👥 Creating agents...")
         agent_start = time.time()
 
-        # Create agents from DataFrame
-        agents_data = []
-        for row in self.p.agents_df.iter_rows(named=True):
-            agents_data.append(row)
+        # Get the DataFrame from parameters
+        agents_df: pl.DataFrame = self.p.agents_df
 
-        # Create AgentList with the data
-        agents = self.agents(EvacuationAgent, len(agents_data))
+        # Convert to list of dictionaries for AgentPy
+        agents_data = agents_df.to_dicts()
 
-        # Assign parameters to each agent
-        for i, agent in enumerate(agents):
-            agent.p.update(agents_data[i])
+        print(f"   Processed {len(agents_data)} agent records")
+
+        # Create agents using AgentPy's method but with individual parameters
+        self.agents = ap.AgentList(self)
+
+        for i, agent_data in enumerate(agents_data):
+            # Create agent and pass individual data through setup
+            agent = EvacuationAgent(self, agent_id=i)
+            # Call setup again with individual data
+            agent.setup(**agent_data)
+            self.agents.append(agent)
 
         agent_time = time.time() - agent_start
-        print(f"✅ Created {len(agents)} agents in {agent_time:.2f}s")
+        print(f"✅ Created {len(self.agents)} agents in {agent_time:.2f}s")
 
         # Bottleneck monitoring
         self.edge_load = defaultdict(int)
@@ -589,7 +637,7 @@ class EvacuationModel(ap.Model):
         return mode_mapping.get(mode, "CAR")
 
 
-def run_simulation(parameters: Dict):
+def run_simulation(parameters):
     """Run the evacuation simulation with the given parameters."""
     # Create model
     model = EvacuationModel(parameters)
