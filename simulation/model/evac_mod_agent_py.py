@@ -13,6 +13,7 @@ import agentpy as ap
 import networkx as nx
 import osmnx as ox
 import polars as pl
+from haversine import haversine
 from shapely.geometry import Point
 
 # Configure OSMnx for better performance
@@ -201,7 +202,7 @@ class EvacuationAgent(ap.Agent):
         # If home is not an option, find the nearest designated shelter.
         if self.target_node is None:
             self.target_node = self.model.get_nearest_shelter_node(
-                self.current_pos_node, self.main_mode
+                self, source_node=self.current_pos_node, mode=self.main_mode
             )
 
         if self.target_node is None:
@@ -209,7 +210,9 @@ class EvacuationAgent(ap.Agent):
             return
 
         # Calculate the path using the model's pathfinding service.
-        self.path = self.model.plan_route(self, self.current_pos_node, self.target_node)
+        self.path = self.model.plan_route_astar(
+            self, self.current_pos_node, self.target_node
+        )
 
         if self.path:
             self.status = "EVACUATING"
@@ -232,9 +235,25 @@ class EvacuationAgent(ap.Agent):
 
         u, v = self.path[0], self.path[1]
 
-        # Get edge data
+        # Get edge data - properly handling multigraphs
         graph = self.model.graphs[self.model._normalize_mode(self.main_mode)]
-        edge_data = graph.edges[u, v] if (u, v) in graph.edges else None
+        edge_data = None
+
+        try:
+            if nx.is_multigraphical(graph):
+                # For multigraphs, we need an edge key
+                if graph.has_edge(u, v):
+                    # Get the first key (or a specific key if needed)
+                    keys = list(graph[u][v].keys())
+                    if keys:
+                        edge_data = graph[u][v][keys[0]]
+            else:
+                # For simple graphs
+                if graph.has_edge(u, v):
+                    edge_data = graph[u][v]
+        except Exception as e:
+            warnings.warn(f"Error accessing edge data: {e}")
+            edge_data = None
 
         if edge_data is None:
             warnings.warn(
@@ -466,7 +485,17 @@ class EvacuationModel(ap.Model):
             try:
                 # Use CAR graph for edge data
                 graph = self.graphs["CAR"]
-                edge_data = graph.edges[u, v]
+                edge_data = None
+
+                if nx.is_multigraphical(graph):
+                    if graph.has_edge(u, v):
+                        keys = list(graph[u][v].keys())
+                        if keys:
+                            edge_data = graph[u][v][keys[0]]
+                else:
+                    if graph.has_edge(u, v):
+                        edge_data = graph[u][v]
+
                 capacity = edge_data.get("capacity", 20) if edge_data else 20
 
                 if load > capacity:
@@ -481,7 +510,7 @@ class EvacuationModel(ap.Model):
                             "avg_svi_stuck": avg_svi,
                         }
                     )
-            except (KeyError, TypeError, ZeroDivisionError):
+            except (KeyError, TypeError, ZeroDivisionError) as e:
                 continue
 
     # --- HELPER METHODS (API FOR AGENTS) ---
@@ -524,38 +553,84 @@ class EvacuationModel(ap.Model):
         dist, idx = kdtree.query([pos], k=1)
         return node_ids[idx[0]]
 
-    def get_nearest_shelter_node(self, source_node: int, mode: str) -> Optional[int]:
-        """Finds the closest pre-computed shelter to an agent's current node."""
+    def get_nearest_shelter_node(
+        self, agent: EvacuationAgent, source_node: int, mode: str
+    ) -> Optional[int]:
+        """Finds the closest shelter using single-source Dijkstra."""
+        shelter_start = time.time()
+
         mode = self._normalize_mode(mode)
         shelters = self.shelter_nodes.get(mode)
         if not shelters or source_node is None:
+            shelter_time = time.time() - shelter_start
+            print(
+                f"No shelters available for Agent {agent.id} ({mode}) in {shelter_time:.3f}s "
+                f"(searched at {self.sim_time.strftime('%H:%M:%S')})"
+            )
             return None
 
         graph = self.graphs.get(mode)
         if not graph:
+            shelter_time = time.time() - shelter_start
+            print(
+                f"No graph available for Agent {agent.id} ({mode}) in {shelter_time:.3f}s "
+                f"(searched at {self.sim_time.strftime('%H:%M:%S')})"
+            )
             return None
 
-        # Check if source node is already a shelter
         if source_node in shelters:
+            shelter_time = time.time() - shelter_start
+            print(
+                f"Agent {agent.id} already at shelter in {shelter_time:.3f}s "
+                f"(found at {self.sim_time.strftime('%H:%M:%S')})"
+            )
             return source_node
 
-        # Compute distance to each shelter on-demand
         try:
+            # Single Dijkstra run - stops when all shelters are found
+            distances = nx.single_source_dijkstra_path_length(
+                graph, source_node, weight="length", cutoff=None
+            )
+
+            # Find nearest shelter from computed distances
             min_distance = float("inf")
             nearest_shelter = None
 
             for shelter in shelters:
-                try:
-                    path_length = nx.shortest_path_length(
-                        graph, source=source_node, target=shelter, weight="length"
-                    )
-                    if path_length < min_distance:
-                        min_distance = path_length
-                        nearest_shelter = shelter
-                except nx.NetworkXNoPath:
-                    continue
+                if shelter in distances and distances[shelter] < min_distance:
+                    min_distance = distances[shelter]
+                    nearest_shelter = shelter
+
+            shelter_time = time.time() - shelter_start
+
+            if nearest_shelter:
+                print(
+                    f"Nearest shelter found for Agent {agent.id} in {shelter_time:.3f}s "
+                    f"(distance: {min_distance:.0f}m, searched at {self.sim_time.strftime('%H:%M:%S')})"
+                )
+            else:
+                print(
+                    f"No reachable shelter found for Agent {agent.id} in {shelter_time:.3f}s "
+                    f"(searched at {self.sim_time.strftime('%H:%M:%S')})"
+                )
 
             return nearest_shelter
+
+        except nx.NetworkXError:
+            shelter_time = time.time() - shelter_start
+            print(
+                f"Shelter search failed for Agent {agent.id} (NetworkX error) in {shelter_time:.3f}s "
+                f"(at {self.sim_time.strftime('%H:%M:%S')})"
+            )
+            return None
+
+        except Exception as e:
+            shelter_time = time.time() - shelter_start
+            print(
+                f"Shelter search error for Agent {agent.id} in {shelter_time:.3f}s: {e} "
+                f"(at {self.sim_time.strftime('%H:%M:%S')})"
+            )
+            return None
 
         except Exception as e:
             print(f"Error finding nearest shelter for {mode}: {e}")
@@ -600,6 +675,94 @@ class EvacuationModel(ap.Model):
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return []
 
+    def plan_route_astar(
+        self, agent: EvacuationAgent, source_node: int, target_node: int
+    ) -> list:
+        """
+        Calculates the shortest path using A* algorithm with geographic heuristic.
+        Much faster than Dijkstra for large geographical networks.
+        """
+        astar_start = time.time()
+
+        mode = self._normalize_mode(agent.main_mode)
+        graph = self.graphs.get(mode)
+        if not graph or source_node is None or target_node is None:
+            return []
+
+        # Check if source and target are the same
+        if source_node == target_node:
+            return [source_node]
+
+        agent_speed = max(agent.speed_m_s, 0.1)
+
+        # Get target node coordinates for heuristic calculation
+        target_data = graph.nodes.get(target_node)
+        if not target_data or "x" not in target_data or "y" not in target_data:
+            # Fallback to Dijkstra if we can't get coordinates
+            return self.plan_route(agent, source_node, target_node)
+
+        target_x, target_y = float(target_data["x"]), float(target_data["y"])
+
+        def heuristic(node_id: int, _target=None) -> float:
+            """
+            Geographic heuristic: Euclidean distance to target.
+            This is admissible (never overestimates) for geographical networks.
+
+            Note: _target is ignored as we already have target_node in closure
+            """
+            node_data = graph.nodes.get(node_id)
+            if not node_data or "x" not in node_data or "y" not in node_data:
+                return 0.0
+
+            node_x, node_y = float(node_data["x"]), float(node_data["y"])
+
+            # Calculate haversine distance with correct lat/lon format
+            # OSMnx stores x=longitude, y=latitude
+            node_coords = (node_y, node_x)  # (lat, lon)
+            target_coords = (target_y, target_x)  # (lat, lon)
+
+            haversine_dist = haversine(node_coords, target_coords, unit="m")
+
+            # Convert to travel time estimate
+            if mode == "CAR":
+                return haversine_dist / agent_speed * 1.1  # 10% buffer
+            else:
+                return haversine_dist
+
+        def dynamic_weight(u, v, data):
+            """Dynamic weight function that considers congestion for car agents"""
+            base_length = data.get("length", 1.0)
+
+            if mode == "CAR":
+                base_travel_time = base_length / agent_speed
+                congestion = self.get_edge_congestion((u, v))
+                penalty_factor = 2**congestion
+                return base_travel_time * penalty_factor
+            else:
+                return base_length
+
+        try:
+            # Use A* with proper weight function (not string)
+            path = nx.astar_path(
+                graph,
+                source=source_node,
+                target=target_node,
+                heuristic=heuristic,
+                weight=dynamic_weight,
+            )
+
+            astar_time = time.time() - astar_start
+            print(
+                f"A* path found for Agent {agent.id} in {astar_time:.3f}s "
+                f"(planned at {self.sim_time.strftime('%H:%M:%S')})"
+            )
+
+            return path
+        except (nx.NetworkXNoPath, nx.NodeNotFound, KeyError) as e:
+            astar_time = time.time() - astar_start
+            print(f"A* failed for Agent {agent.id} after {astar_time:.3f}s: {e}")
+            return []
+
     def report_edge_usage(self, agent: EvacuationAgent, edge: tuple):
         """Called by agents to report which road they are on this step."""
         if agent.main_mode == "CAR":
@@ -615,7 +778,17 @@ class EvacuationModel(ap.Model):
         try:
             u, v = edge
             graph = self.graphs["CAR"]
-            edge_data = graph.edges[u, v]
+            edge_data = None
+
+            if nx.is_multigraphical(graph):
+                if graph.has_edge(u, v):
+                    keys = list(graph[u][v].keys())
+                    if keys:
+                        edge_data = graph[u][v][keys[0]]
+            else:
+                if graph.has_edge(u, v):
+                    edge_data = graph[u][v]
+
             capacity = edge_data.get("capacity", 20) if edge_data else 20
             return load / capacity
         except (KeyError, TypeError, ZeroDivisionError):
