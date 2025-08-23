@@ -74,15 +74,14 @@ def main():
 
     print(f"--- SIMULATION STARTING --- {datetime.now()}")
 
-    # Initialize environment
-
+    # Initialize environment - center is passed as (lat, lon)
     env = EnvironmentInitializer(
         (SCENARIO_CENTER_LAT, SCENARIO_CENTER_LON), SCENARIO_RADIUS_KM
     )
     evacuation_area_polygon = env.get_made_polygon
     gc.collect()
 
-    # Gather agents
+    # Gather agents - center is passed as (lat, lon)
     agents_gatherer = AgentsGatherer(
         evacuation_area_polygon=evacuation_area_polygon,
         evac_area_center=(SCENARIO_CENTER_LAT, SCENARIO_CENTER_LON),
@@ -94,7 +93,7 @@ def main():
         fallback_to_full_trace=False, verbose=False
     )
     agents_df = pl.read_csv("data/mesa_initializers.csv").limit(
-        50
+        150
     )  # TODO: REMOVE LIMIT LATER
 
     if agents_df.is_empty():

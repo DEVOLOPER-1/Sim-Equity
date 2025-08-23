@@ -83,28 +83,27 @@ class EnvironmentInitializer:
         points: int = 360,
     ) -> List[Tuple[float, float]]:
         """
-        Build a polygon (list of lat, lon in degrees) approximating a circle on the sphere.
+        Build a polygon (list of coordinates) approximating a circle on the sphere.
 
-        - radius_km: radius in kilometers (defaults to self.radius_km)
-        - center: (lat, lon) in degrees (defaults to self.center)
-        - points: number of vertices around the circle
+        Returns coordinates in (lon, lat) order for Shapely compatibility
         """
         radius_km = self.radius_km
         center = self.center
 
-        lat0, lon0 = center
+        lat0, lon0 = center  # Input center is (lat, lon)
         polygon: List[Tuple[float, float]] = []
         for k in range(points):
-            bearing_rad = math.radians(
-                k * 360.0 / points
-            )  # adds tolerance if points aren't 360
+            bearing_rad = math.radians(k * 360.0 / points)
             lat2_deg, lon2_deg = self.__determine_forward_position(
                 lat0, lon0, bearing_rad, radius_km
             )
-            polygon.append((lat2_deg, lon2_deg))
-        # Close polygon (optional)
+            # Return in (lon, lat) order for Shapely
+            polygon.append((lon2_deg, lat2_deg))
+
+        # Close polygon
         if polygon:
             polygon.append(polygon[0])
+
         return polygon
 
     # ----------------------------
@@ -222,7 +221,11 @@ class EnvironmentInitializer:
         plt.show()
 
     def __build_the_polygon(self):
-        self.made_polygon = Polygon(self.__calculate_evacuation_area())
+        coordinates = self.__calculate_evacuation_area()
+        self.made_polygon = Polygon(coordinates)
+        print(f"Built evacuation polygon with {len(coordinates)} points")
+        print(f"Polygon bounds: {self.made_polygon.bounds}")
+        print(f"Polygon is valid: {self.made_polygon.is_valid}")
 
     @property
     def get_made_polygon(self) -> shapely.geometry.Polygon:
@@ -239,7 +242,8 @@ class EnvironmentInitializer:
             title = f"Evacuation Zone - Geographic View ({self.radius_km} km radius)"
 
         polygon = self.__calculate_evacuation_area()
-        lats, lons = zip(*polygon)
+        # polygon is now in (lon, lat) format, so we need to separate correctly
+        lons, lats = zip(*polygon)
 
         # Calculate bounds for better display
         lat_range = max(lats) - min(lats)
@@ -259,10 +263,10 @@ class EnvironmentInitializer:
             label=f"Evacuation Boundary ({self.radius_km} km)",
         )
 
-        # Plot center point
+        # Plot center point - center is (lat, lon), so swap for plotting
         ax.plot(
-            self.center[1],
-            self.center[0],
+            self.center[1],  # lon
+            self.center[0],  # lat
             marker="o",
             color="black",
             markersize=12,

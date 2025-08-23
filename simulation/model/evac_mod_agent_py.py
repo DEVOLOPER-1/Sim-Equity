@@ -276,12 +276,15 @@ class EvacuationAgent(ap.Agent):
 
         # Destination Logic: Is the agent's home a safe and known destination?
         is_home_safe = self.home_location and not self.model.is_pos_in_evacuation_area(
-            self.home_location
+            self.home_location, True
         )
         if is_home_safe:
-            self.target_node = self.model.get_nearest_node(
-                self.home_location, self.main_mode
-            )
+            home_node = self.model.get_nearest_node(self.home_location, self.main_mode)
+            # ADDED: Verify home node is actually outside evacuation area
+            if home_node and not self.model.is_node_in_evacuation_area(
+                home_node, self.main_mode
+            ):
+                self.target_node = home_node
 
         # If home is not an option, find the nearest designated shelter.
         if self.target_node is None:
@@ -291,6 +294,11 @@ class EvacuationAgent(ap.Agent):
 
         if self.target_node is None:
             self.fail_agent("Could not determine a valid destination")
+            return
+
+        # ADDED: Final verification that target node is outside evacuation area
+        if self.model.is_node_in_evacuation_area(self.target_node, self.main_mode):
+            self.fail_agent("Target node is inside evacuation area")
             return
 
         # Calculate the path using the model's pathfinding service.
@@ -310,7 +318,6 @@ class EvacuationAgent(ap.Agent):
             warnings.warn(
                 f"Agent {self.id}: Failed to find a valid path from {self.current_pos_node} to {self.target_node}."
             )
-            # Don't set to FAILED yet, let it try again next step
 
     def move(self):
         """Moves the agent from one node to the next along its calculated path."""
@@ -564,9 +571,9 @@ class EvacuationModel(ap.Model):
         # Filter to safe amenities (outside evacuation zone)
         safe_amenities = []
         for row in amenities_df.iter_rows(named=True):
-            if not self.is_pos_in_evacuation_area(
-                (row["latitude"], row["longitude"]), False
-            ):
+            # Amenities CSV has latitude, longitude columns
+            lat, lon = row["latitude"], row["longitude"]
+            if not self.is_pos_in_evacuation_area((lat, lon), if_lat_lon=True):
                 safe_amenities.append(row)
 
         print(f"   Filtered to {len(safe_amenities):,} safe amenities")
@@ -576,7 +583,7 @@ class EvacuationModel(ap.Model):
 
         # Process each mode
         for mode, graph in self.graphs.items():
-            # Extract coordinates for batch processing
+            # Extract coordinates for batch processing - amenities are (lat, lon)
             amenity_coords = [
                 (row["latitude"], row["longitude"]) for row in safe_amenities
             ]
@@ -588,6 +595,7 @@ class EvacuationModel(ap.Model):
                 if "x" in data and "y" in data:
                     try:
                         x, y = float(data["x"]), float(data["y"])
+                        # OSMnx: x=lon, y=lat, convert to (lat, lon) for KDTree
                         node_points.append((y, x))  # (lat, lon)
                         node_ids.append(node_id)
                     except (ValueError, TypeError):
@@ -596,7 +604,7 @@ class EvacuationModel(ap.Model):
             if not node_points:
                 continue
 
-            # Create KDTree
+            # Create KDTree - both amenity_coords and node_points are (lat, lon)
             from scipy.spatial import KDTree
 
             kdtree = KDTree(node_points)
@@ -605,12 +613,23 @@ class EvacuationModel(ap.Model):
             dists, idxs = kdtree.query(amenity_coords, k=1)
             nearest_nodes = [node_ids[i] for i in idxs]
 
-            # Add to shelters set
-            for node in nearest_nodes:
-                if node is not None:
-                    shelters[mode].add(node)
+            # ADDED: Verify nodes are outside evacuation area
+            for i, node_id in enumerate(nearest_nodes):
+                if node_id is not None:
+                    node_data = graph.nodes[node_id]
+                    # Get node coordinates (x=lon, y=lat)
+                    node_lat, node_lon = node_data["y"], node_data["x"]
+                    # Check if node is outside evacuation area
+                    if not self.is_pos_in_evacuation_area(
+                        (node_lat, node_lon), if_lat_lon=True
+                    ):
+                        shelters[mode].add(node_id)
+                    else:
+                        print(
+                            f"   Excluding node {node_id} as it's inside evacuation area"
+                        )
 
-            print(f"   Found {len(nearest_nodes):,} shelter nodes for {mode}")
+            print(f"   Found {len(shelters[mode]):,} shelter nodes for {mode}")
 
         total_shelters = sum(len(s) for s in shelters.values())
         print(f"   Found {total_shelters:,} unique shelter locations across all modes")
@@ -655,16 +674,50 @@ class EvacuationModel(ap.Model):
     # --- HELPER METHODS (API FOR AGENTS) ---
 
     def is_pos_in_evacuation_area(self, pos: tuple, if_lat_lon: bool = True) -> bool:
-        """Checks if a (lat, lon) point is inside the evacuation polygon."""
-        if if_lat_lon:
-            return self.evac_polygon.contains(
-                Point(pos[1], pos[0])
-            )  # Convert (lat, lon) to (lon, lat)
+        """Checks if a point is inside the evacuation polygon.
 
-        return self.evac_polygon.contains(Point(pos[0], pos[1]))  # Already (lon, lat)
+        Args:
+            pos: Position as either (lat, lon) or (lon, lat)
+            if_lat_lon: If True, pos is (lat, lon); if False, pos is (lon, lat)
+
+        Returns:
+            True if point is inside evacuation area
+        """
+        if if_lat_lon:
+            # Convert (lat, lon) to (lon, lat) for Shapely
+            lon, lat = pos[1], pos[0]
+        else:
+            # Already in (lon, lat) format
+            lon, lat = pos[0], pos[1]
+
+        return self.evac_polygon.contains(Point(lon, lat))
+
+    def is_node_in_evacuation_area(self, node_id: int, mode: str) -> bool:
+        """Check if a graph node is inside the evacuation area."""
+        mode = self._normalize_mode(mode)
+        graph = self.graphs.get(mode)
+        if not graph or node_id not in graph.nodes:
+            return False
+
+        node_data = graph.nodes[node_id]
+        # OSMnx: x=lon, y=lat
+        node_lat, node_lon = node_data.get("y"), node_data.get("x")
+
+        if node_lat is None or node_lon is None:
+            return False
+
+        return self.is_pos_in_evacuation_area((node_lat, node_lon), if_lat_lon=True)
 
     def get_nearest_node(self, pos: tuple, mode: str) -> Optional[int]:
-        """Finds the nearest node in the graph to the given position."""
+        """Finds the nearest node in the graph to the given position.
+
+        Args:
+            pos: Position as (lat, lon) tuple
+            mode: Transportation mode
+
+        Returns:
+            Nearest node ID or None
+        """
         mode = self._normalize_mode(mode)
         graph = self.graphs.get(mode)
         if not graph or pos is None:
@@ -677,6 +730,8 @@ class EvacuationModel(ap.Model):
             if "x" in data and "y" in data:
                 try:
                     x, y = float(data["x"]), float(data["y"])
+                    # OSMnx stores x=longitude, y=latitude
+                    # Convert to (lat, lon) for KDTree to match input format
                     node_points.append((y, x))  # (lat, lon)
                     node_ids.append(node_id)
                 except (ValueError, TypeError):
@@ -689,7 +744,7 @@ class EvacuationModel(ap.Model):
         from scipy.spatial import KDTree
 
         kdtree = KDTree(node_points)
-        dist, idx = kdtree.query([pos], k=1)
+        dist, idx = kdtree.query([pos], k=1)  # pos is (lat, lon)
         return node_ids[idx[0]]
 
     def get_nearest_shelter_node(
@@ -741,6 +796,14 @@ class EvacuationModel(ap.Model):
                     nearest_shelter = shelter
 
             shelter_time = time.time() - shelter_start
+
+            if nearest_shelter and self.is_node_in_evacuation_area(
+                nearest_shelter, mode
+            ):
+                print(
+                    f"Warning: Shelter node {nearest_shelter} is inside evacuation area"
+                )
+                return None
 
             if nearest_shelter:
                 print(
@@ -1023,7 +1086,7 @@ class EvacuationModel(ap.Model):
                 print(f"Agent {agent.id}: No path history available")
 
             # Append data to lists
-            agent_ids.append(agent.id)
+            agent_ids.append(agent.unique_id)
             svi_values.append(getattr(agent, "svi", None))
             main_modes.append(getattr(agent, "main_mode", None))
             statuses.append(getattr(agent, "status", None))
@@ -1038,7 +1101,7 @@ class EvacuationModel(ap.Model):
 
         # Create DataFrame from collected data
         self.agent_paths_df = pl.DataFrame(
-            {
+            data={
                 "agent_id": agent_ids,
                 "svi": svi_values,
                 "main_mode": main_modes,
