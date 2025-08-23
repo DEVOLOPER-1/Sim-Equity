@@ -2,12 +2,12 @@
 # --------------------------------
 # AgentPy implementation of the evacuation simulation
 # Migrated from Mesa for better performance and maintainability
-
+import os
 import time
 import warnings
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import agentpy as ap
 import networkx as nx
@@ -39,7 +39,7 @@ class EvacuationAgent(ap.Agent):
             self.agent_data = {}
 
         self.status = "INACTIVE"
-
+        self.unique_id = str(self._get_param("ID", ""))
         # Access agent-specific data (try both self.p and self.agent_data)
         self.svi = float(self._get_param("SVI_normalized", 0.0))
         self.main_mode = self._get_param("main_mode", "WALKING")
@@ -72,6 +72,12 @@ class EvacuationAgent(ap.Agent):
             self.fail_reason = "Could not find valid starting node on graph"
             return  # Skip further initialization
 
+        # Initialize path history FIRST
+        self.path_history: list[Dict[str, Any]] = []
+
+        # Add starting position to path history - SIMPLIFIED AND FIXED
+        self._add_position_to_history(step=0, force_add=True)
+
         # Rest of the initialization...
         self.target_node = None
         self.path = []
@@ -82,6 +88,78 @@ class EvacuationAgent(ap.Agent):
 
         # Time management and SVI-driven behavior
         self._init_behavioral_params()
+
+    def _add_position_to_history(self, step=None, force_add=False):
+        """Helper method to add current position to path history with proper error handling."""
+        try:
+            # Use current model step if not provided
+            if step is None:
+                step = getattr(self.model, "t", 0)
+
+            # Get current simulation time
+            current_time = getattr(self.model, "sim_time", self.model.start_datetime)
+            if isinstance(current_time, datetime):
+                current_time = current_time.isoformat()
+
+            # Validate we have necessary data
+            if not self.current_pos_node:
+                if not force_add:  # Only warn if not forced (like initial setup)
+                    print(f"Agent {self.id}: No current position node to log")
+                return False
+
+            if not self.main_mode:
+                print(f"Agent {self.id}: No main mode defined")
+                return False
+
+            # Get the appropriate graph and node data
+            normalized_mode = self.model._normalize_mode(self.main_mode)
+            if normalized_mode not in self.model.graphs:
+                print(
+                    f"Agent {self.id}: Mode {normalized_mode} not in available graphs"
+                )
+                return False
+
+            graph = self.model.graphs[normalized_mode]
+            if self.current_pos_node not in graph:
+                print(
+                    f"Agent {self.id}: Node {self.current_pos_node} not in {normalized_mode} graph"
+                )
+                return False
+
+            node_data = graph.nodes[self.current_pos_node]
+            if "x" not in node_data or "y" not in node_data:
+                print(
+                    f"Agent {self.id}: Node {self.current_pos_node} missing coordinates"
+                )
+                return False
+
+            # Create the history entry
+            history_entry = {
+                "step": step,
+                "time": current_time,
+                "x": float(node_data["x"]),
+                "y": float(node_data["y"]),
+                "mode": self.main_mode,
+                "status": self.status,
+            }
+
+            # Add to path history
+            self.path_history.append(history_entry)
+
+            # Debug output for first few entries
+            if len(self.path_history) <= 3:
+                print(
+                    f"Agent {self.id}: Added path history entry {len(self.path_history)}: {history_entry}"
+                )
+
+            return True
+
+        except Exception as e:
+            print(f"Agent {self.id}: Error adding position to history: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return False
 
     def _get_param(self, key, default=None):
         """Get parameter from agent data with fallback."""
@@ -162,6 +240,8 @@ class EvacuationAgent(ap.Agent):
         if self.status == "INACTIVE":
             if self.model.sim_time >= self.effective_activation_time:
                 self.status = "PLANNING"
+                # Log the status change
+                self._add_position_to_history()
             else:
                 return
 
@@ -169,6 +249,9 @@ class EvacuationAgent(ap.Agent):
 
         if self.status == "PLANNING":
             self.plan_evacuation_route()
+            # Log after planning
+            if self.status == "EVACUATING":  # Planning was successful
+                self._add_position_to_history()
 
         if self.status == "EVACUATING":
             if self.is_stuck_in_traffic():
@@ -176,6 +259,7 @@ class EvacuationAgent(ap.Agent):
                 if self.time_stuck_s > self.patience_threshold_s:
                     self.status = "PLANNING"  # Trigger replanning
                     self.time_stuck_s = 0
+                    self._add_position_to_history()  # Log replanning
             else:
                 self.time_stuck_s = 0
             self.move()
@@ -218,6 +302,9 @@ class EvacuationAgent(ap.Agent):
             self.status = "EVACUATING"
             self.time_on_current_edge_s = 0.0  # Reset edge timer for the new path
             self.replan_attempts = 0  # Reset replan counter on success
+            print(
+                f"Agent {self.id}: Successfully planned route with {len(self.path)} nodes"
+            )
         else:
             self.replan_attempts += 1
             warnings.warn(
@@ -231,6 +318,8 @@ class EvacuationAgent(ap.Agent):
             self.status = (
                 "ARRIVED" if self.current_pos_node == self.target_node else "FAILED"
             )
+            # Log final status
+            self._add_position_to_history()
             return
 
         u, v = self.path[0], self.path[1]
@@ -276,12 +365,25 @@ class EvacuationAgent(ap.Agent):
             >= time_to_traverse_edge_s
         ):
             # Agent will complete the edge in this step
+            old_node = self.current_pos_node
             self.current_pos_node = v
             self.path.pop(0)  # Advance to the next node in the path
             self.time_on_current_edge_s = 0.0
+
+            print(
+                f"Agent {self.id}: Moved from node {old_node} to {self.current_pos_node}"
+            )
+
+            # ALWAYS log position after moving to a new node
+            self._add_position_to_history()
+
         else:
             # Agent continues along the current edge
             self.time_on_current_edge_s += self.model.step_seconds
+            # Even if not moving to a new node, we can log intermediate positions
+            # But only occasionally to avoid too much data
+            if self.model.t % 5 == 0:  # Every 5 steps
+                self._add_position_to_history()
 
     def is_stuck_in_traffic(self) -> bool:
         """Checks if the agent's next intended edge is congested."""
@@ -295,6 +397,9 @@ class EvacuationAgent(ap.Agent):
         """Helper method to fail an agent with a descriptive message"""
         warnings.warn(f"Agent {self.id}: {reason}. Setting status to FAILED.")
         self.status = "FAILED"
+        self.fail_reason = reason
+        # Log the failure
+        self._add_position_to_history()
 
 
 class EvacuationModel(ap.Model):
@@ -310,6 +415,24 @@ class EvacuationModel(ap.Model):
         self.svi_speed_penalty = self.p.svi_speed_penalty
         self.max_svi_start_delay_s = self.p.max_svi_start_delay_s
         self.base_patience_s = self.p.base_patience_s
+
+        # Initialize agent paths DataFrame
+        self.agent_paths_df = pl.DataFrame(
+            schema={
+                "agent_id": pl.Int32,
+                "svi": pl.Float32,
+                "main_mode": pl.Utf8,
+                "status": pl.Utf8,
+                "evacuation_time": pl.Int32,
+                "start_lat": pl.Float64,
+                "start_lon": pl.Float64,
+                "end_lat": pl.Float64,
+                "end_lon": pl.Float64,
+                "fail_reason": pl.Utf8,
+                "started_at": pl.Utf8,
+                "arrived_at": pl.Utf8,
+            }
+        )
 
         # Environment data
         print("📊 Loading graphs...")
@@ -412,6 +535,22 @@ class EvacuationModel(ap.Model):
             f"Failed: {status_counts['FAILED']}, "
             f"Inactive: {status_counts['INACTIVE']}"
         )
+
+        # Debug: Check path history for a few agents every 10 steps
+        if self.t % 10 == 0:
+            agents_with_history = [
+                a
+                for a in self.agents
+                if hasattr(a, "path_history") and len(a.path_history) > 0
+            ]
+            print(
+                f"Debug: {len(agents_with_history)} agents have path history at step {self.t}"
+            )
+            if agents_with_history:
+                sample_agent = agents_with_history[0]
+                print(
+                    f"Sample agent {sample_agent.id} has {len(sample_agent.path_history)} history entries"
+                )
 
     def _precompute_shelter_nodes(self, amenities_df: pl.DataFrame) -> Dict[str, set]:
         """Finds nearest graph nodes for all out-of-bounds amenities."""
@@ -632,10 +771,6 @@ class EvacuationModel(ap.Model):
             )
             return None
 
-        except Exception as e:
-            print(f"Error finding nearest shelter for {mode}: {e}")
-            return None
-
     def plan_route(
         self, agent: EvacuationAgent, source_node: int, target_node: int
     ) -> list:
@@ -789,7 +924,7 @@ class EvacuationModel(ap.Model):
                 if graph.has_edge(u, v):
                     edge_data = graph[u][v]
 
-            capacity = edge_data.get("capacity", 20) if edge_data else 20
+            capacity = float(edge_data.get("capacity", 5))
             return load / capacity
         except (KeyError, TypeError, ZeroDivisionError):
             return 0.0
@@ -809,13 +944,140 @@ class EvacuationModel(ap.Model):
         }
         return mode_mapping.get(mode, "CAR")
 
+    def collect_agent_paths_data(self) -> pl.DataFrame:
+        """Collect path history data from all agents into the Polars DataFrame."""
+        print("📊 Collecting agent path history data...")
+
+        # Create lists for each column
+        agent_ids = []
+        svi_values = []
+        main_modes = []
+        statuses = []
+        evac_times = []
+        start_lats = []
+        start_lons = []
+        end_lats = []
+        end_lons = []
+        fail_reasons = []
+        started_ats = []
+        arrived_ats = []
+
+        # Ensure the traces directory exists
+        traces_dir = "simulation_outcomes/agents_traces"
+        os.makedirs(traces_dir, exist_ok=True)
+
+        # Debug: Count agents with path history
+        agents_with_history = sum(
+            1
+            for agent in self.agents
+            if hasattr(agent, "path_history") and agent.path_history
+        )
+        print(
+            f"Debug: {agents_with_history} out of {len(self.agents)} agents have path history"
+        )
+
+        # Collect data from all agents
+        for agent in self.agents:
+            # Get start and end positions from path history if available
+            start_lat, start_lon, end_lat, end_lon = None, None, None, None
+            started_at, arrived_at = None, None
+
+            if hasattr(agent, "path_history") and agent.path_history:
+                print(
+                    f"Agent {agent.id}: Has {len(agent.path_history)} path history entries"
+                )
+
+                # Write trace CSV for this agent
+                if len(agent.path_history) >= 1:
+                    try:
+                        his_df = pl.DataFrame(agent.path_history)
+                        trace_file = f"{traces_dir}/{agent.unique_id}.csv"
+                        his_df.write_csv(trace_file)
+                        print(
+                            f"✅ Written trace for agent {agent.unique_id} ({len(agent.path_history)} entries)"
+                        )
+                    except Exception as e:
+                        print(
+                            f"❌ Error writing trace for agent {agent.unique_id}: {e}"
+                        )
+                        import traceback
+
+                        traceback.print_exc()
+
+                if len(agent.path_history) > 0:
+                    first_entry = agent.path_history[0]
+                    start_lat = first_entry.get("y")
+                    start_lon = first_entry.get("x")
+                    started_at = first_entry.get("time")
+                    if isinstance(started_at, datetime):
+                        started_at = started_at.isoformat()
+
+                if len(agent.path_history) > 0:
+                    last_entry = agent.path_history[-1]
+                    end_lat = last_entry.get("y")
+                    end_lon = last_entry.get("x")
+                    arrived_at = last_entry.get("time")
+                    if isinstance(arrived_at, datetime):
+                        arrived_at = arrived_at.isoformat()
+            else:
+                print(f"Agent {agent.id}: No path history available")
+
+            # Append data to lists
+            agent_ids.append(agent.id)
+            svi_values.append(getattr(agent, "svi", None))
+            main_modes.append(getattr(agent, "main_mode", None))
+            statuses.append(getattr(agent, "status", None))
+            evac_times.append(getattr(agent, "evacuation_time", 0))
+            start_lats.append(start_lat)
+            start_lons.append(start_lon)
+            end_lats.append(end_lat)
+            end_lons.append(end_lon)
+            fail_reasons.append(getattr(agent, "fail_reason", None))
+            started_ats.append(started_at)
+            arrived_ats.append(arrived_at)
+
+        # Create DataFrame from collected data
+        self.agent_paths_df = pl.DataFrame(
+            {
+                "agent_id": agent_ids,
+                "svi": svi_values,
+                "main_mode": main_modes,
+                "status": statuses,
+                "evacuation_time": evac_times,
+                "start_lat": start_lats,
+                "start_lon": start_lons,
+                "end_lat": end_lats,
+                "end_lon": end_lons,
+                "fail_reason": fail_reasons,
+                "started_at": started_ats,
+                "arrived_at": arrived_ats,
+            }
+        )
+
+        print(f"✅ Collected path data for {len(agent_ids)} agents")
+        return self.agent_paths_df
+
 
 def run_simulation(parameters):
     """Run the evacuation simulation with the given parameters."""
+    # Create output directories
+    os.makedirs("simulation_outcomes", exist_ok=True)
+    os.makedirs("simulation_outcomes/agents_traces", exist_ok=True)
+
     # Create model
     model = EvacuationModel(parameters)
 
     # Run simulation
     results = model.run(steps=parameters.get("steps", 60), display=True)
+
+    # Collect agent paths data after simulation
+    agent_paths_df = model.collect_agent_paths_data()
+
+    # Add the DataFrame to the results for later use in analytics
+    results.agent_paths_df = agent_paths_df
+
+    # Write the DataFrame to CSV
+    agent_paths_df.write_csv("simulation_outcomes/Agents_Statistics_Trial.csv")
+    print("✅ Successfully wrote agent statistics to CSV")
 
     return model, results

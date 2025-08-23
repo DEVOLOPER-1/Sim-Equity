@@ -1,15 +1,20 @@
 # FILE: simulation_analytics.py
 # -----------------------------
 import pathlib
+from collections import defaultdict
 from functools import wraps
 from typing import Any, Callable, Optional
 
+# Add this at the top to ensure we use a backend that works well for saving
+import matplotlib
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
 import osmnx as ox
 import polars as pl
 import seaborn as sns
+
+matplotlib.use("Agg")  # Use non-interactive backend
 
 
 class SimulationAnalytics:
@@ -261,7 +266,7 @@ class SimulationAnalytics:
 
         fig, ax = plt.subplots(figsize=figsize)
 
-        # Check if we have valid evacuation time data
+        # Check if we have valid evacuation time data - Fix the boolean evaluation
         if (
             arrived_pandas["evacuation_time"].isna().all()
             or (arrived_pandas["evacuation_time"] == 0).all()
@@ -424,6 +429,17 @@ class SimulationAnalytics:
             print("No drive network graph provided.")
             return None
 
+        # Debug: Check graph
+        print(f"Graph has {len(G_drive.nodes)} nodes and {len(G_drive.edges)} edges")
+
+        # Verify some nodes have coordinates
+        sample_nodes = list(G_drive.nodes)[:5]
+        print("Sample nodes with coordinates:")
+        for node in sample_nodes:
+            print(
+                f"Node {node}: {G_drive.nodes[node].get('x')}, {G_drive.nodes[node].get('y')}"
+            )
+
         # Aggregate bottleneck data: find the maximum congestion for each edge
         edge_agg = self.bottleneck_df.group_by("edge_nodes").agg(
             [
@@ -435,9 +451,14 @@ class SimulationAnalytics:
         edge_colors = {}
         edge_tuples = []
 
+        print(f"Processing {len(edge_agg)} bottleneck edges")
+
         for row in edge_agg.iter_rows(named=True):
             edge_str = row["edge_nodes"]
             avg_svi = row["avg_svi_stuck"]
+
+            # Debug the edge string format
+            print(f"Processing edge: {edge_str}, SVI: {avg_svi}")
 
             # Parse edge string to tuple
             try:
@@ -456,43 +477,87 @@ class SimulationAnalytics:
 
         if not edge_colors:
             print("No valid bottleneck edges found to plot.")
-            return None
+            # Create a basic map without bottlenecks
+            fig, ax = ox.plot_graph(
+                G_drive,
+                node_size=0,
+                edge_linewidth=0.5,
+                edge_color="lightgray",
+                bgcolor="#FFFFFF",
+                figsize=figsize,
+                show=False,
+                close=False,
+            )
+            ax.set_title(
+                "Geospatial Map (No Bottlenecks Found)", fontsize=18, fontweight="bold"
+            )
+            plt.tight_layout()
+            return fig
 
         # Get the colors and widths for edges
         ec = []
         ew = []
 
+        # Debug: Count matches
+        matched_edges = 0
+
         for edge in G_drive.edges():
             if edge in edge_colors:
                 ec.append(edge_colors[edge])
                 ew.append(5)  # Thick line for bottlenecks
+                matched_edges += 1
             else:
                 ec.append("lightgray")
                 ew.append(0.5)  # Thin line for normal edges
 
-        print(f"Plotting map with {len(edge_colors)} bottlenecked edges.")
-
-        fig, ax = ox.plot_graph(
-            G_drive,
-            edge_color=ec,
-            edge_linewidth=ew,
-            node_size=0,
-            figsize=figsize,
-            bgcolor="#FFFFFF",
-            show=False,
-            close=False,
+        print(
+            f"Matched {matched_edges} bottlenecked edges out of {len(edge_colors)} identified"
         )
 
-        # Add a colorbar for SVI
-        sm = plt.cm.ScalarMappable(cmap="plasma", norm=plt.Normalize(vmin=0, vmax=1))
-        sm.set_array([])
-        cbar = fig.colorbar(sm, ax=ax, orientation="horizontal", pad=0.02, shrink=0.5)
-        cbar.set_label("Average SVI of Agents in Bottleneck", fontsize=12)
+        try:
+            print(f"Plotting map with {len(edge_colors)} bottlenecked edges")
 
-        ax.set_title("Geospatial Bottleneck Analysis", fontsize=18, fontweight="bold")
-        plt.tight_layout()
-        plt.show()
-        return fig
+            # Plot with explicit figure creation
+            fig, ax = plt.subplots(figsize=figsize)
+
+            # Use plot_graph with our figure and axis
+            ox.plot_graph(
+                G_drive,
+                ax=ax,
+                edge_color=ec,
+                edge_linewidth=ew,
+                node_size=0,
+                bgcolor="#FFFFFF",
+                show=False,
+                close=False,
+            )
+
+            # Add a colorbar for SVI
+            sm = plt.cm.ScalarMappable(
+                cmap="plasma", norm=plt.Normalize(vmin=0, vmax=1)
+            )
+            sm.set_array([])
+            cbar = fig.colorbar(
+                sm, ax=ax, orientation="horizontal", pad=0.02, shrink=0.5
+            )
+            cbar.set_label("Average SVI of Agents in Bottleneck", fontsize=12)
+
+            ax.set_title(
+                "Geospatial Bottleneck Analysis", fontsize=18, fontweight="bold"
+            )
+            plt.tight_layout()
+
+            # Save the figure explicitly in addition to autosave
+            plt.savefig("debug_bottleneck_map.png", dpi=300, bbox_inches="tight")
+            print("Debug map saved to debug_bottleneck_map.png")
+
+            return fig
+        except Exception as e:
+            print(f"Error plotting bottleneck map: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return None
 
     # --- ADDITIONAL ANALYTICS FOR AGENTPY MODEL ---
     @autosave
@@ -595,6 +660,249 @@ class SimulationAnalytics:
         self.analyze_svi_vs_outcome()
 
         print("=" * 50)
+
+    @autosave
+    def plot_agent_traces(self, mode_filter=None, figsize=(15, 15)):
+        """Plot all agent traces on a map, filtered by transportation mode."""
+        if not hasattr(self, "model") or not hasattr(self.model, "graphs"):
+            print("No model or graph data available for trace plotting")
+            return None
+
+        # Filter agents by mode if specified
+        agents_to_plot = self.agent_df
+        if mode_filter:
+            agents_to_plot = agents_to_plot.filter(pl.col("main_mode") == mode_filter)
+
+        if agents_to_plot.is_empty():
+            print(f"No agents found with mode {mode_filter}")
+            return None
+
+        # Get appropriate graph for the mode
+        graph_mode = (
+            "CAR"
+            if mode_filter == "CAR"
+            else "WALKING" if mode_filter == "WALKING" else "BIKE"
+        )
+        G = self.model.graphs.get(graph_mode)
+
+        if G is None:
+            print(f"No graph available for mode {graph_mode}")
+            return None
+
+        # Debug graph
+        print(f"{graph_mode} graph has {len(G.nodes)} nodes and {len(G.edges)} edges")
+
+        try:
+            # Create figure and axis explicitly
+            fig, ax = plt.subplots(figsize=figsize)
+
+            # Plot the graph background
+            ox.plot_graph(
+                G,
+                ax=ax,
+                node_size=0,
+                edge_linewidth=0.5,
+                edge_color="lightgray",
+                show=False,
+                close=False,
+            )
+
+            # Plot each agent's path
+            colors = plt.cm.tab10.colors
+            paths_plotted = 0
+
+            for i, agent_id in enumerate(agents_to_plot["agent_id"]):
+                agent = next((a for a in self.model.agents if a.id == agent_id), None)
+                if agent and hasattr(agent, "path_history") and agent.path_history:
+                    # Debug
+                    print(
+                        f"Agent {agent_id} has {len(agent.path_history)} path history points"
+                    )
+
+                    # Extract node coordinates
+                    nodes_x = []
+                    nodes_y = []
+                    for point in agent.path_history:
+                        node_data = G.nodes.get(point["node"])
+                        if node_data and "x" in node_data and "y" in node_data:
+                            nodes_x.append(node_data["x"])
+                            nodes_y.append(node_data["y"])
+
+                    if nodes_x and nodes_y:
+                        color = colors[i % len(colors)]
+                        ax.plot(nodes_x, nodes_y, color=color, linewidth=1, alpha=0.7)
+                        # Mark start and end points
+                        ax.scatter(
+                            nodes_x[0],
+                            nodes_y[0],
+                            color="green",
+                            s=50,
+                            marker="o",
+                            label="Start" if i == 0 else "",
+                        )
+                        ax.scatter(
+                            nodes_x[-1],
+                            nodes_y[-1],
+                            color="red",
+                            s=50,
+                            marker="x",
+                            label="End" if i == 0 else "",
+                        )
+                        paths_plotted += 1
+
+            print(f"Plotted {paths_plotted} agent paths")
+
+            if paths_plotted == 0:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "No agent paths found to display",
+                    horizontalalignment="center",
+                    verticalalignment="center",
+                    transform=ax.transAxes,
+                    fontsize=14,
+                )
+
+            ax.set_title(f"Agent Traces - {mode_filter} Mode", fontsize=16)
+            if paths_plotted > 0:
+                ax.legend()
+            plt.tight_layout()
+
+            # Save the figure explicitly in addition to autosave
+            plt.savefig(
+                f"debug_agent_traces_{mode_filter}.png", dpi=300, bbox_inches="tight"
+            )
+            print(f"Debug traces saved to debug_agent_traces_{mode_filter}.png")
+
+            return fig
+
+        except Exception as e:
+            print(f"Error plotting agent traces: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return None
+
+    @autosave
+    def plot_road_usage_heatmap(self, mode="CAR", figsize=(15, 15)):
+        """Create a heatmap of most frequently used roads."""
+        if not hasattr(self, "model"):
+            print("No model data available for road usage analysis")
+            return None
+
+        G = self.model.graphs.get(mode)
+        if G is None:
+            print(f"No graph available for mode {mode}")
+            return None
+
+        print(f"Graph for {mode} has {len(G.nodes)} nodes and {len(G.edges)} edges")
+
+        # Count edge usage across all agents
+        edge_usage = defaultdict(int)
+        agents_with_history = 0
+
+        for agent in self.model.agents:
+            if (
+                hasattr(agent, "path_history")
+                and agent.path_history
+                and agent.main_mode == mode
+            ):
+                agents_with_history += 1
+                for i in range(len(agent.path_history) - 1):
+                    edge = (
+                        agent.path_history[i]["node"],
+                        agent.path_history[i + 1]["node"],
+                    )
+                    edge_usage[edge] += 1
+
+        print(f"Found {agents_with_history} agents with path history for mode {mode}")
+        print(f"Collected usage data for {len(edge_usage)} edges")
+
+        if not edge_usage:
+            print(f"No road usage data for mode {mode}")
+            # Create a basic map without usage data
+            try:
+                fig, ax = plt.subplots(figsize=figsize)
+                ox.plot_graph(
+                    G,
+                    ax=ax,
+                    node_size=0,
+                    edge_linewidth=0.5,
+                    edge_color="lightgray",
+                    show=False,
+                    close=False,
+                )
+                ax.set_title(f"Road Network - {mode} Mode (No Usage Data)", fontsize=16)
+                plt.tight_layout()
+                return fig
+            except Exception as e:
+                print(f"Error creating basic map: {e}")
+                return None
+
+        try:
+            # Create edge colors based on usage
+            max_usage = max(edge_usage.values())
+            print(f"Maximum edge usage: {max_usage}")
+
+            edge_colors = []
+            edge_widths = []
+
+            edges_with_usage = 0
+
+            for u, v in G.edges():
+                usage = edge_usage.get((u, v), 0) + edge_usage.get((v, u), 0)
+                if usage > 0:
+                    # Normalize to 0-1 range for colormap
+                    norm_usage = usage / max_usage
+                    edge_colors.append(plt.cm.plasma(norm_usage))
+                    edge_widths.append(1 + norm_usage * 3)
+                    edges_with_usage += 1
+                else:
+                    edge_colors.append("lightgray")
+                    edge_widths.append(0.2)
+
+            print(
+                f"Found {edges_with_usage} edges with usage data out of {len(G.edges())} total edges"
+            )
+
+            # Create figure and axis explicitly
+            fig, ax = plt.subplots(figsize=figsize)
+
+            ox.plot_graph(
+                G,
+                ax=ax,
+                edge_color=edge_colors,
+                edge_linewidth=edge_widths,
+                node_size=0,
+                show=False,
+                close=False,
+            )
+
+            # Add colorbar
+            sm = plt.cm.ScalarMappable(
+                cmap=plt.cm.plasma, norm=plt.Normalize(vmin=0, vmax=max_usage)
+            )
+            sm.set_array([])
+            cbar = fig.colorbar(
+                sm, ax=ax, orientation="horizontal", pad=0.02, shrink=0.6
+            )
+            cbar.set_label("Number of Agents Traversed", fontsize=12)
+
+            ax.set_title(f"Road Usage Heatmap - {mode} Mode", fontsize=16)
+            plt.tight_layout()
+
+            # Save the figure explicitly in addition to autosave
+            plt.savefig(f"debug_road_usage_{mode}.png", dpi=300, bbox_inches="tight")
+            print(f"Debug road usage map saved to debug_road_usage_{mode}.png")
+
+            return fig
+
+        except Exception as e:
+            print(f"Error plotting road usage heatmap: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return None
 
 
 def _save_figure_static(fig, func_name: str, **save_kwargs):

@@ -1,10 +1,15 @@
 # FILE: main.py
 import gc
 import json
+import os
 import time
 from datetime import datetime
 
+# Set matplotlib backend early
+import matplotlib
 import polars as pl
+
+matplotlib.use("Agg")  # Force Agg backend for saving without display
 
 from simulation.model.agents_model_initializer import AgentsGatherer
 from simulation.model.evac_mod_agent_py import run_simulation
@@ -64,7 +69,7 @@ def main():
     SCENARIO_CENTER_LAT = 48.858844
     SCENARIO_CENTER_LON = 2.347012
     SCENARIO_RADIUS_KM = 50.0
-    MAX_SIMULATION_STEPS = 5
+    MAX_SIMULATION_STEPS = 60
     DATA_DIR = "simulation/maps_data/osmnx_layers/"
 
     print(f"--- SIMULATION STARTING --- {datetime.now()}")
@@ -124,6 +129,8 @@ def main():
     print(f"Running simulation for {MAX_SIMULATION_STEPS} steps... {datetime.now()}")
     start_time = time.time()
 
+    os.makedirs("simulation_outcomes", exist_ok=True)
+    os.makedirs("simulation_outcomes/agents_traces", exist_ok=True)
     # Run the simulation
     model, results = run_simulation(parameters)
 
@@ -219,15 +226,76 @@ def main():
             save=True, save_kwargs={"filename": "evacuation_equity_gap.png"}
         )
 
-        # 5. Bottleneck map (if bottleneck data exists and graphs are available)
+        # 5. Check if bottleneck data exists
         if len(analytics.bottleneck_df) > 0:
-            analytics.plot_bottleneck_map(
-                save=True, save_kwargs={"filename": "bottleneck_map.png"}
-            )
+            print(f"Found {len(analytics.bottleneck_df)} bottleneck records")
+            try:
+                print("Creating bottleneck map...")
+                analytics.plot_bottleneck_map(
+                    save=True, save_kwargs={"filename": "bottleneck_map.png"}
+                )
+            except Exception as e:
+                print(f"-> Bottleneck map generation failed: {e}")
+                import traceback
+
+                traceback.print_exc()
         else:
             print("-> No bottleneck data available for mapping")
 
-        print("-> All visualizations generated successfully")
+        print("-> Basic visualizations generated successfully")
+
+        # After existing analytics calls
+        print("Creating trace visualizations...")
+
+        # Plot traces for each mode
+        for mode in ["CAR", "WALKING", "BIKE"]:
+            try:
+                print(f"Creating agent traces for {mode}...")
+                analytics.plot_agent_traces(
+                    mode_filter=mode,
+                    save=True,
+                    save_kwargs={"filename": f"agent_traces_{mode.lower()}.png"},
+                )
+            except Exception as e:
+                print(f"-> Agent trace visualization for {mode} failed: {e}")
+                import traceback
+
+                traceback.print_exc()
+
+        # Plot road usage heatmaps
+        for mode in ["CAR", "WALKING", "BIKE"]:
+            try:
+                print(f"Creating road usage heatmap for {mode}...")
+                analytics.plot_road_usage_heatmap(
+                    mode=mode,
+                    save=True,
+                    save_kwargs={"filename": f"road_usage_{mode.lower()}.png"},
+                )
+            except Exception as e:
+                print(f"-> Road usage heatmap for {mode} failed: {e}")
+                import traceback
+
+                traceback.print_exc()
+
+        # Check for path_history in agents
+        print("Checking agent path history data...")
+        agents_with_history = sum(
+            1 for a in model.agents if hasattr(a, "path_history") and a.path_history
+        )
+        print(
+            f"-> {agents_with_history} out of {len(model.agents)} agents have path history"
+        )
+        if agents_with_history > 0:
+            sample_agent = next(
+                (
+                    a
+                    for a in model.agents
+                    if hasattr(a, "path_history") and a.path_history
+                ),
+                None,
+            )
+            if sample_agent:
+                print(f"Sample path history: {sample_agent.path_history[:3]}")
 
         # Save agent states as CSV for further analysis
         analytics.agent_df.write_csv("final_agent_states.csv")
