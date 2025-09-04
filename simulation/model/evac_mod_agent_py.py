@@ -91,6 +91,7 @@ class EvacuationAgent(ap.Agent):
     def setup(self, **kwargs) -> None:
         """
         Initialize agent properties with individual data.
+        FIXED: Enhanced error handling and type safety
 
         Args:
             **kwargs: Agent-specific data including location, mode, SVI, etc.
@@ -98,22 +99,25 @@ class EvacuationAgent(ap.Agent):
         # Ensure all required attributes exist first
         self.ensure_required_attributes()
 
-        # Store agent data
+        # Store agent data with type safety
         self.agent_data = kwargs if kwargs else {}
         if kwargs:
             self.p.update(kwargs)
 
-        # Basic agent properties
+        # Basic agent properties with safe extraction
         self.status = "INACTIVE"
         self.unique_id = str(self._get_param("ID", f"agent_{self.id}"))
-        self.svi = float(self._get_param("SVI_normalized", 0.0))
+
+        # Safe SVI extraction and validation
+        raw_svi = self._get_param("SVI_normalized", 0.0)
+        self.svi = self._safe_numeric_conversion(raw_svi, 0.0, 0.0, 1.0)
 
         # Transport mode setup with fallback chain
         requested_mode = self._get_param("main_mode", "WALKING")
         self.original_mode = requested_mode
         self.main_mode = self._setup_transport_mode(requested_mode)
 
-        # Location handling
+        # Location handling with validation
         self.home_location = self._get_location(
             "home_location_lat", "home_location_lon"
         )
@@ -136,8 +140,21 @@ class EvacuationAgent(ap.Agent):
         self.path_history: List[Dict[str, Any]] = []
         self._add_position_to_history(step=0, force_add=True)
 
-        # Initialize behavioral parameters based on SVI
-        self._init_behavioral_params()
+        # Initialize behavioral parameters based on SVI (with error handling)
+        try:
+            self._init_behavioral_params()
+        except Exception as e:
+            print(
+                f"Error initializing behavioral params for agent {self.unique_id}: {e}"
+            )
+            # Set safe defaults
+            self.speed_m_s = 1.4  # Default walking speed
+            self.patience_threshold_s = 300.0  # 5 minutes
+            self.evacuation_time = 0.0
+            self.time_stuck_s = 0.0
+            self.effective_activation_time = getattr(
+                self.model, "start_datetime", datetime.now()
+            )
 
         print(
             f"Agent {self.unique_id}: Initialized with mode {self.main_mode} at node {self.current_pos_node}"
@@ -213,6 +230,7 @@ class EvacuationAgent(ap.Agent):
     ) -> Optional[Tuple[float, float]]:
         """
         Safely extract and validate location coordinates.
+        FIXED: Enhanced validation and error handling
 
         Args:
             lat_key (str): Key for latitude value
@@ -221,24 +239,46 @@ class EvacuationAgent(ap.Agent):
         Returns:
             Optional[Tuple[float, float]]: (lat, lon) tuple or None if invalid
         """
-        lat = self._get_param(lat_key)
-        lon = self._get_param(lon_key)
-
         try:
-            if lat is not None and lon is not None:
-                lat_float = float(lat)
-                lon_float = float(lon)
-                if -90 <= lat_float <= 90 and -180 <= lon_float <= 180:
-                    return (lat_float, lon_float)
-        except (ValueError, TypeError):
-            pass
-        return None
+            lat_raw = self._get_param(lat_key)
+            lon_raw = self._get_param(lon_key)
+
+            if lat_raw is None or lon_raw is None:
+                return None
+
+            # Safe conversion with bounds checking
+            lat_float = self._safe_numeric_conversion(lat_raw, None, -90.0, 90.0)
+            lon_float = self._safe_numeric_conversion(lon_raw, None, -180.0, 180.0)
+
+            if lat_float is None or lon_float is None:
+                return None
+
+            return (lat_float, lon_float)
+
+        except Exception as e:
+            print(f"Error extracting location from {lat_key}, {lon_key}: {e}")
+            return None
 
     def _init_behavioral_params(self) -> None:
         """
         Initialize agent-specific timing and behavioral parameters based on SVI.
         Higher SVI leads to delayed activation, slower movement, and less patience.
+        FIXED: Robust type handling for all numeric calculations
         """
+        # Safely convert SVI to float
+        svi_value = self._safe_numeric_conversion(self.svi, 0.0, 0.0, 1.0)
+
+        # Safely get model parameters
+        max_svi_delay = self._safe_numeric_conversion(
+            getattr(self.model, "max_svi_start_delay_s", 1800), 1800.0, 0.0, 7200.0
+        )
+        svi_speed_penalty = self._safe_numeric_conversion(
+            getattr(self.model, "svi_speed_penalty", 0.3), 0.3, 0.0, 1.0
+        )
+        base_patience = self._safe_numeric_conversion(
+            getattr(self.model, "base_patience_s", 300), 300.0, 60.0, 3600.0
+        )
+
         # Reaction Delay (SVI affects when agent starts evacuating)
         start_time_str = self._get_param("start_time")
         base_activation_time = (
@@ -246,37 +286,116 @@ class EvacuationAgent(ap.Agent):
             if start_time_str
             else self.model.start_datetime
         )
-        start_delay_s = self.svi * self.model.max_svi_start_delay_s
+        start_delay_s = svi_value * max_svi_delay
         self.effective_activation_time = base_activation_time + timedelta(
             seconds=start_delay_s
         )
 
         # Speed Penalty (SVI reduces movement speed)
         base_speed_m_s = self._get_base_speed()
-        self.speed_m_s = base_speed_m_s * (
-            1.0 - self.svi * self.model.svi_speed_penalty
-        )
+        speed_multiplier = max(
+            0.1, 1.0 - svi_value * svi_speed_penalty
+        )  # Ensure minimum 10% of base speed
+        self.speed_m_s = base_speed_m_s * speed_multiplier
 
         # Patience Threshold (SVI reduces patience for traffic)
-        self.patience_threshold_s = self.model.base_patience_s * (1.0 - self.svi)
+        patience_multiplier = max(0.1, 1.0 - svi_value)  # Ensure minimum 10% patience
+        self.patience_threshold_s = base_patience * patience_multiplier
 
         # Reset timing counters
         self.evacuation_time = 0.0
         self.time_stuck_s = 0.0
 
+        # Debug output for problematic agents
+        if hasattr(self, "unique_id"):
+            print(
+                f"Agent {self.unique_id} initialized: SVI={svi_value:.3f}, Speed={self.speed_m_s:.2f}m/s, Patience={self.patience_threshold_s:.0f}s"
+            )
+
     def _get_base_speed(self) -> float:
         """
         Get appropriate base speed based on current transport mode.
+        FIXED: Robust type handling and fallback values
 
         Returns:
             float: Base speed in meters per second
         """
-        mode_speeds = {
-            "WALKING": self._get_param("walking_speed_m_s", 1.4),  # ~5 km/h
-            "BIKE": self._get_param("cycling_speed_m_s", 4.5),  # ~16 km/h
-            "CAR": self._get_param("driving_speed_m_s", 13.9),  # ~50 km/h
+        # Default speeds (m/s)
+        default_speeds = {
+            "WALKING": 1.4,  # ~5 km/h
+            "BIKE": 4.5,  # ~16 km/h
+            "CAR": 13.9,  # ~50 km/h
         }
-        return mode_speeds.get(self.main_mode, self._get_param("median_speed_m_s", 1.4))
+
+        mode = getattr(self, "main_mode", "WALKING")
+
+        # Try mode-specific parameter first
+        mode_speed_params = {
+            "WALKING": "walking_speed_m_s",
+            "BIKE": "cycling_speed_m_s",
+            "CAR": "driving_speed_m_s",
+        }
+
+        if mode in mode_speed_params:
+            param_name = mode_speed_params[mode]
+            speed = self._get_param(param_name, default_speeds.get(mode, 1.4))
+            return self._safe_numeric_conversion(
+                speed, default_speeds.get(mode, 1.4), 0.1, 50.0
+            )
+
+        # Fallback to median speed parameter
+        median_speed = self._get_param("median_speed_m_s", 1.4)
+        return self._safe_numeric_conversion(median_speed, 1.4, 0.1, 50.0)
+
+    def _safe_numeric_conversion(
+        self, value, default: float, min_val: float = None, max_val: float = None
+    ) -> float:
+        """
+        Safely convert a value to float with bounds checking.
+
+        Args:
+            value: Value to convert
+            default: Default value if conversion fails
+            min_val: Minimum allowed value (optional)
+            max_val: Maximum allowed value (optional)
+
+        Returns:
+            float: Converted and bounded value
+        """
+        try:
+            # Handle None
+            if value is None:
+                return default
+
+            # Handle string representations
+            if isinstance(value, str):
+                # Try to parse common string formats
+                value = value.strip()
+                if not value:
+                    return default
+                # Convert string to float
+                numeric_value = float(value)
+            elif isinstance(value, (list, tuple)):
+                # If it's a sequence, this is likely an error
+                print(f"Warning: Expected numeric value but got sequence: {value}")
+                return default
+            else:
+                # Try direct conversion
+                numeric_value = float(value)
+
+            # Apply bounds if specified
+            if min_val is not None:
+                numeric_value = max(numeric_value, min_val)
+            if max_val is not None:
+                numeric_value = min(numeric_value, max_val)
+
+            return numeric_value
+
+        except (ValueError, TypeError) as e:
+            print(
+                f"Warning: Could not convert value '{value}' to float: {e}. Using default {default}"
+            )
+            return default
 
     def update(self) -> None:
         """
@@ -937,8 +1056,11 @@ class EvacuationModel(ap.Model):
             self.step_seconds = base_step_seconds
 
     def _initialize_data_structures(self) -> None:
-        """Initialize data collection structures with enhanced journey tracking."""
-        # Main agent summary DataFrame
+        """
+        Initialize data collection structures with enhanced journey tracking and destination info.
+        ENHANCED: Added destination-related fields to the schema
+        """
+        # Main agent summary DataFrame with enhanced schema
         self.agent_paths_df = pl.DataFrame(
             schema={
                 "agent_id": pl.Utf8,
@@ -946,7 +1068,7 @@ class EvacuationModel(ap.Model):
                 "original_mode": pl.Utf8,
                 "final_mode": pl.Utf8,
                 "status": pl.Utf8,
-                "evacuation_time_minutes": pl.Float32,  # Changed to minutes for clarity
+                "evacuation_time_minutes": pl.Float32,
                 "total_distance_m": pl.Float32,
                 "start_lat": pl.Float64,
                 "start_lon": pl.Float64,
@@ -966,10 +1088,18 @@ class EvacuationModel(ap.Model):
                 "total_walking_time_minutes": pl.Float32,
                 "stations_visited": pl.Utf8,  # JSON string of station details
                 "routes_taken": pl.Utf8,  # JSON string of route information
+                # ENHANCED: Destination fields
+                "target_destination_name": pl.Utf8,
+                "target_destination_type": pl.Utf8,
+                "target_destination_lat": pl.Float64,
+                "target_destination_lon": pl.Float64,
+                "target_destination_distance_m": pl.Float32,
+                "destination_category": pl.Utf8,
+                "is_home_destination": pl.Boolean,
             }
         )
 
-        # Detailed journey segments DataFrame for transit users
+        # Detailed journey segments DataFrame for transit users (unchanged)
         self.journey_segments_df = pl.DataFrame(
             schema={
                 "agent_id": pl.Utf8,
@@ -2164,10 +2294,12 @@ class EvacuationModel(ap.Model):
 
     def collect_agent_paths_data(self) -> pl.DataFrame:
         """
-        Collect comprehensive agent data including detailed journey information.
-        FIXED: Proper type handling for DataFrame creation
+        Collect comprehensive agent data including detailed journey information and destination details.
+        ENHANCED: Now includes target destination name and coordinates
         """
-        print("Collecting enhanced agent path and journey data...")
+        print(
+            "Collecting enhanced agent path and journey data with destination tracking..."
+        )
 
         # Initialize data collectors
         agent_summary_data = []
@@ -2183,7 +2315,7 @@ class EvacuationModel(ap.Model):
         # Process each agent
         for i, agent in enumerate(self.agents):
             try:
-                agent_data = self._collect_agent_summary(agent)
+                agent_data = self._collect_agent_summary_enhanced(agent)
                 agent_summary_data.append(agent_data)
 
                 # Collect detailed journey segments for transit users
@@ -2296,8 +2428,127 @@ class EvacuationModel(ap.Model):
 
         return self.agent_paths_df
 
-    def _collect_agent_summary(self, agent) -> Dict[str, Any]:
-        """Collect comprehensive summary data for an agent."""
+    # def _collect_agent_summary(self, agent) -> Dict[str, Any]:
+    #     """Collect comprehensive summary data for an agent."""
+    #     import json
+    #
+    #     # Validate final status
+    #     try:
+    #         self._validate_agent_final_status(agent)
+    #     except Exception as e:
+    #         print(
+    #             f"Warning: Could not validate final status for agent {agent.unique_id}: {e}"
+    #         )
+    #
+    #     # Extract basic information
+    #     start_lat, start_lon, end_lat, end_lon = None, None, None, None
+    #     started_at, arrived_at = None, None
+    #     total_distance = 0.0
+    #
+    #     # Process path history
+    #     if hasattr(agent, "path_history") and agent.path_history:
+    #         # Start position and time
+    #         first_entry = agent.path_history[0]
+    #         start_lat = first_entry.get("y")
+    #         start_lon = first_entry.get("x")
+    #         started_at = first_entry.get("time")
+    #
+    #         # End position and time
+    #         last_entry = agent.path_history[-1]
+    #         end_lat = last_entry.get("y")
+    #         end_lon = last_entry.get("x")
+    #         arrived_at = last_entry.get("time")
+    #
+    #         # Calculate total distance
+    #         for i in range(len(agent.path_history)):
+    #             total_distance += agent.path_history[i].get("distance_traveled_m", 0.0)
+    #
+    #     # Check evacuation area status for start and end positions
+    #     start_in_evac = None
+    #     end_in_evac = None
+    #
+    #     if start_lat and start_lon:
+    #         try:
+    #             start_in_evac = self.is_pos_in_evacuation_area(
+    #                 (start_lat, start_lon),
+    #                 if_lat_lon=True,
+    #                 debug_agent_id=agent.unique_id,
+    #             )
+    #         except Exception as e:
+    #             print(
+    #                 f"Warning: Could not check start evacuation status for agent {agent.unique_id}: {e}"
+    #             )
+    #             start_in_evac = None
+    #
+    #     if end_lat and end_lon:
+    #         try:
+    #             end_in_evac = self.is_pos_in_evacuation_area(
+    #                 (end_lat, end_lon), if_lat_lon=True, debug_agent_id=agent.unique_id
+    #             )
+    #         except Exception as e:
+    #             print(
+    #                 f"Warning: Could not check end evacuation status for agent {agent.unique_id}: {e}"
+    #             )
+    #             end_in_evac = None
+    #
+    #     # Calculate transit-specific metrics
+    #     try:
+    #         transit_data = self._calculate_transit_metrics(agent)
+    #     except Exception as e:
+    #         print(
+    #             f"Warning: Could not calculate transit metrics for agent {agent.unique_id}: {e}"
+    #         )
+    #         transit_data = {
+    #             "total_wait_time": 0.0,
+    #             "total_transit_time": 0.0,
+    #             "total_walking_time": 0.0,
+    #             "stations": [],
+    #             "routes": [],
+    #         }
+    #
+    #     return {
+    #         "agent_id": str(agent.unique_id),
+    #         "svi": float(getattr(agent, "svi", 0.0)),
+    #         "original_mode": str(
+    #             getattr(agent, "original_mode", getattr(agent, "main_mode", "UNKNOWN"))
+    #         ),
+    #         "final_mode": str(getattr(agent, "main_mode", "UNKNOWN")),
+    #         "status": str(getattr(agent, "status", "UNKNOWN")),
+    #         "evacuation_time_minutes": float(getattr(agent, "evacuation_time", 0.0))
+    #         / 60.0,
+    #         "total_distance_m": float(total_distance),
+    #         "start_lat": float(start_lat) if start_lat is not None else None,
+    #         "start_lon": float(start_lon) if start_lon is not None else None,
+    #         "end_lat": float(end_lat) if end_lat is not None else None,
+    #         "end_lon": float(end_lon) if end_lon is not None else None,
+    #         "fail_reason": (
+    #             str(getattr(agent, "fail_reason", ""))
+    #             if getattr(agent, "fail_reason", None)
+    #             else None
+    #         ),
+    #         "started_at": str(started_at) if started_at else None,
+    #         "arrived_at": str(arrived_at) if arrived_at else None,
+    #         "used_public_transport": bool(
+    #             getattr(agent, "using_public_transport", False)
+    #         ),
+    #         "segments_completed": int(getattr(agent, "current_journey_segment", 0)),
+    #         "total_segments": int(len(getattr(agent, "journey_plan", []))),
+    #         "start_in_evacuation_area": start_in_evac,
+    #         "end_in_evacuation_area": end_in_evac,
+    #         # Transit metrics
+    #         "total_wait_time_minutes": float(transit_data["total_wait_time"]) / 60.0,
+    #         "total_transit_time_minutes": float(transit_data["total_transit_time"])
+    #         / 60.0,
+    #         "total_walking_time_minutes": float(transit_data["total_walking_time"])
+    #         / 60.0,
+    #         "stations_visited": json.dumps(transit_data["stations"]),
+    #         "routes_taken": json.dumps(transit_data["routes"]),
+    #     }
+    def _collect_agent_summary_enhanced(self, agent) -> Dict[str, Any]:
+        """
+        Collect comprehensive summary data for an agent including destination information.
+        ENHANCED: Now includes target destination name, type, and coordinates
+        """
         import json
 
         # Validate final status
@@ -2374,6 +2625,9 @@ class EvacuationModel(ap.Model):
                 "routes": [],
             }
 
+        # ENHANCED: Extract destination information
+        destination_info = self._extract_destination_info(agent)
+
         return {
             "agent_id": str(agent.unique_id),
             "svi": float(getattr(agent, "svi", 0.0)),
@@ -2411,7 +2665,195 @@ class EvacuationModel(ap.Model):
             / 60.0,
             "stations_visited": json.dumps(transit_data["stations"]),
             "routes_taken": json.dumps(transit_data["routes"]),
+            # ENHANCED: Destination information
+            "target_destination_name": destination_info["name"],
+            "target_destination_type": destination_info["type"],
+            "target_destination_lat": destination_info["lat"],
+            "target_destination_lon": destination_info["lon"],
+            "target_destination_distance_m": destination_info["distance_m"],
+            "destination_category": destination_info["category"],
+            "is_home_destination": destination_info["is_home"],
         }
+
+    def _extract_destination_info(self, agent) -> Dict[str, Any]:
+        """
+        Extract comprehensive destination information for an agent.
+
+        Args:
+            agent: The evacuation agent
+
+        Returns:
+            Dict containing destination name, type, coordinates, and metadata
+        """
+        destination_info = {
+            "name": None,
+            "type": "Unknown",
+            "lat": None,
+            "lon": None,
+            "distance_m": 0.0,
+            "category": "Unknown",
+            "is_home": False,
+        }
+
+        # Check if agent has a target node
+        target_node = getattr(agent, "target_node", None)
+        if target_node is None:
+            return destination_info
+
+        # Get target coordinates
+        target_coords = self.get_node_coordinates(target_node, agent.main_mode)
+        if not target_coords:
+            return destination_info
+
+        target_lat, target_lon = target_coords
+        destination_info["lat"] = float(target_lat)
+        destination_info["lon"] = float(target_lon)
+
+        # Calculate distance from start to destination
+        if hasattr(agent, "start_pos") and agent.start_pos:
+            start_lat, start_lon = agent.start_pos
+            destination_info["distance_m"] = haversine(
+                (start_lat, start_lon), (target_lat, target_lon), unit="m"
+            )
+
+        # Check if destination is home
+        if hasattr(agent, "home_location") and agent.home_location:
+            home_lat, home_lon = agent.home_location
+            home_distance = haversine(
+                (home_lat, home_lon), (target_lat, target_lon), unit="m"
+            )
+            if home_distance < 100:  # Within 100m of home
+                destination_info["is_home"] = True
+                destination_info["name"] = "Home Location"
+                destination_info["type"] = "Residence"
+                destination_info["category"] = "Personal"
+                return destination_info
+
+        # Find nearest amenity to determine destination details
+        destination_details = self._find_destination_details(target_lat, target_lon)
+        if destination_details:
+            destination_info.update(destination_details)
+        else:
+            # Default naming for unknown destinations
+            destination_info["name"] = (
+                f"Safe Location ({target_lat:.4f}, {target_lon:.4f})"
+            )
+            destination_info["type"] = "Safe Zone"
+            destination_info["category"] = "Evacuation"
+
+        return destination_info
+
+    def _find_destination_details(
+        self, target_lat: float, target_lon: float
+    ) -> Dict[str, Any]:
+        """
+        Find the closest amenity to the target coordinates and return destination details.
+
+        Args:
+            target_lat: Target latitude
+            target_lon: Target longitude
+
+        Returns:
+            Dict containing amenity details or None if no close amenity found
+        """
+        try:
+            amenities_df = getattr(self.p, "amenities_df", None)
+            if amenities_df is None or amenities_df.is_empty():
+                return None
+
+            # Calculate distances to all amenities
+            min_distance = float("inf")
+            closest_amenity = None
+
+            for row in amenities_df.iter_rows(named=True):
+                amenity_lat = row.get("latitude")
+                amenity_lon = row.get("longitude")
+
+                if amenity_lat is None or amenity_lon is None:
+                    continue
+
+                distance = haversine(
+                    (target_lat, target_lon), (amenity_lat, amenity_lon), unit="m"
+                )
+
+                if distance < min_distance:
+                    min_distance = distance
+                    closest_amenity = row
+
+            # Only consider amenities within 200m as potential destinations
+            if closest_amenity and min_distance <= 200:
+                return {
+                    "name": closest_amenity.get("name", "Unnamed Shelter"),
+                    "type": closest_amenity.get("amenity", "Shelter"),
+                    "category": self._categorize_amenity(
+                        closest_amenity.get("amenity", "")
+                    ),
+                }
+
+        except Exception as e:
+            print(f"Error finding destination details: {e}")
+
+        return None
+
+    def _categorize_amenity(self, amenity_type: str) -> str:
+        """
+        Categorize amenity types into broader categories.
+
+        Args:
+            amenity_type: The amenity type from OSM
+
+        Returns:
+            Broader category string
+        """
+        amenity_type = str(amenity_type).lower()
+
+        # Healthcare facilities
+        if any(
+            term in amenity_type for term in ["hospital", "clinic", "medical", "health"]
+        ):
+            return "Healthcare"
+
+        # Educational facilities
+        elif any(
+            term in amenity_type
+            for term in ["school", "university", "college", "education"]
+        ):
+            return "Educational"
+
+        # Government/Public facilities
+        elif any(
+            term in amenity_type
+            for term in ["government", "town_hall", "fire_station", "police"]
+        ):
+            return "Government"
+
+        # Religious facilities
+        elif any(
+            term in amenity_type
+            for term in ["place_of_worship", "church", "mosque", "synagogue"]
+        ):
+            return "Religious"
+
+        # Community facilities
+        elif any(
+            term in amenity_type
+            for term in ["community", "social", "library", "centre", "center"]
+        ):
+            return "Community"
+
+        # Transportation
+        elif any(term in amenity_type for term in ["station", "stop", "transport"]):
+            return "Transportation"
+
+        # Commercial
+        elif any(
+            term in amenity_type for term in ["shop", "market", "mall", "commercial"]
+        ):
+            return "Commercial"
+
+        # Default shelter category
+        else:
+            return "Shelter"
 
     def _calculate_transit_metrics(self, agent) -> Dict[str, Any]:
         """Calculate detailed transit usage metrics for an agent."""

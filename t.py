@@ -36,10 +36,11 @@ def load_agent_traces():
     agent_traces = {}
     traces_loaded = 0
     coordinate_issues = 0
-
-    for ag in agents_ids:
+    all_entries = os.listdir("simulation_outcomes/agents_traces")
+    print(all_entries)
+    for ag in all_entries:
         try:
-            trace_file = f"simulation_outcomes/agents_traces/{ag}.csv"
+            trace_file = f"simulation_outcomes/agents_traces/{ag}"
             if not os.path.exists(trace_file):
                 print(f"Trace file not found for agent {ag}")
                 continue
