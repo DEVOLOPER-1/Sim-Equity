@@ -69,7 +69,7 @@ def main():
     SCENARIO_CENTER_LAT = 48.858844
     SCENARIO_CENTER_LON = 2.347012
     SCENARIO_RADIUS_KM = 50.0
-    MAX_SIMULATION_STEPS = 160
+    MAX_SIMULATION_STEPS = 120
     DATA_DIR = "simulation/maps_data/osmnx_layers/"
 
     print(f"--- SIMULATION STARTING --- {datetime.now()}")
@@ -92,9 +92,7 @@ def main():
     agents_gatherer.read_and_summarize_agents(
         fallback_to_full_trace=False, verbose=False
     )
-    agents_df = pl.read_csv("data/mesa_initializers.csv").limit(
-        150
-    )  # TODO: REMOVE LIMIT LATER
+    agents_df = pl.read_csv("data/mesa_initializers.csv")
 
     if agents_df.is_empty():
         print(f"!!! No agents in evacuation zone !!! {datetime.now()}")

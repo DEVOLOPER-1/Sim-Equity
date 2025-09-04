@@ -15,7 +15,7 @@ from shapely.geometry import mapping
 
 def load_agent_traces():
     """
-    Load all agent traces from CSV files with improved coordinate handling.
+    Load all agent traces from CSV files with robust coordinate handling.
 
     Returns:
         dict: Dictionary with agent IDs as keys and their path data as values
@@ -46,52 +46,87 @@ def load_agent_traces():
 
             df = pl.read_csv(trace_file)
 
-            # Check if dataframe is empty
             if df.is_empty():
                 print(f"Empty trace file for agent {ag}")
                 continue
 
-            # Debug: Print first few rows to understand data structure
-            if traces_loaded == 0:  # Only debug first agent
+            # debug first trace structure
+            if traces_loaded == 0:
                 print(f"\nDEBUG - First agent ({ag}) data structure:")
                 print(f"Columns: {df.columns}")
                 print(f"Shape: {df.shape}")
                 print("First 3 rows:")
                 print(df.head(3))
 
-            # Extract coordinates - the CSV has 'y' (latitude) and 'x' (longitude)
-            # We need to convert to [lat, lon] format for Folium
-            coordinates_df = df.select(["y", "x"]).drop_nulls()
-
-            if coordinates_df.is_empty():
-                print(f"No valid coordinates for agent {ag}")
+            # We expect columns 'x' and 'y' but their semantics may be swapped.
+            if "x" not in df.columns or "y" not in df.columns:
+                print(f"Missing x/y columns for agent {ag}, skipping")
                 continue
 
-            # Convert to list of [lat, lon] pairs
+            # Take first non-null sample values to determine which column is lat/lon
+            sample_x = None
+            sample_y = None
+            try:
+                sample_x = float(df.select("x").drop_nulls().to_series()[0])
+                sample_y = float(df.select("y").drop_nulls().to_series()[0])
+            except Exception:
+                # fallback to iter_rows if above fails
+                for r in df.select(["x", "y"]).iter_rows():
+                    if r[0] is not None and r[1] is not None:
+                        sample_x = float(r[0])
+                        sample_y = float(r[1])
+                        break
+
+            if sample_x is None or sample_y is None:
+                print(f"No sample coordinates for agent {ag}, skipping")
+                continue
+
+            # Heuristic: lat values for Paris should be ~48.x, lon ~1..4
+            # Determine which column is lat and which is lon
+            if 40 <= sample_x <= 55 and -20 <= sample_y <= 20:
+                # x looks like latitude, y looks like longitude
+                lat_col, lon_col = "x", "y"
+            elif 40 <= sample_y <= 55 and -20 <= sample_x <= 20:
+                # y is latitude, x is longitude (the common case)
+                lat_col, lon_col = "y", "x"
+            else:
+                # Unknown: fall back to assumption that y is lat and x is lon,
+                # but print a warning so you can inspect.
+                lat_col, lon_col = "y", "x"
+                print(
+                    f"Warning: Could not confidently determine lat/lon columns for agent {ag}. "
+                    f"Sample values: x={sample_x}, y={sample_y}. Assuming {lat_col}=lat, {lon_col}=lon."
+                )
+
+            # Select coordinates with determined order
+            coordinates_df = df.select([lat_col, lon_col]).drop_nulls()
+            if coordinates_df.is_empty():
+                print(
+                    f"No valid coordinates for agent {ag} after selecting {lat_col},{lon_col}"
+                )
+                continue
+
             coordinates = []
             for row in coordinates_df.iter_rows():
-                lat, lon = float(row[0]), float(row[1])  # y=lat, x=lon
-
-                # Validate coordinate ranges
-                if lat and lon:
-                    coordinates.append([lat, lon])  # Folium expects [lat, lon]
-                else:
+                lat, lon = float(row[0]), float(row[1])  # now row[0]=lat, row[1]=lon
+                # Validate numeric
+                if not (abs(lat) < 1e6 and abs(lon) < 1e6):
                     coordinate_issues += 1
-                    if coordinate_issues <= 5:  # Only print first few warnings
+                    if coordinate_issues <= 5:
                         print(
-                            f"Invalid coordinates for agent {ag}: lat={lat}, lon={lon}"
+                            f"Invalid numeric coords for agent {ag}: lat={lat}, lon={lon}"
                         )
+                    continue
 
-            if len(coordinates) >= 2:  # Need at least 2 points for a path
+                coordinates.append([lat, lon])  # Folium expects [lat, lon]
+
+            if len(coordinates) >= 2:
                 agent_traces[ag] = coordinates
                 traces_loaded += 1
-
-                # Debug first agent's coordinates
                 if traces_loaded == 1:
                     print(f"DEBUG - Agent {ag} coordinates sample:")
-                    print(f"  Total points: {len(coordinates)}")
-                    print(f"  First point: {coordinates[0]} (lat, lon)")
-                    print(f"  Last point: {coordinates[-1]} (lat, lon)")
+                    print(f"  Sample lat,lon first point: {coordinates[0]} (lat, lon)")
+                    print(f"  Sample lat,lon last point: {coordinates[-1]} (lat, lon)")
                     print(f"  Path length: {len(coordinates)} points")
             else:
                 print(
@@ -493,7 +528,7 @@ if __name__ == "__main__":
             geojson_path=geojson_path,
             agent_paths=agent_traces,
             evacuation_area=evacuation_polygon,
-            max_agents_to_display=100,  # Show more agents
+            max_agents_to_display=1000,  # Show more agents
             output_html="agent_evacuation_paths_debug.html",
             output_png="agent_evacuation_paths_debug.png",
             title="Île-de-France Region: Agent Evacuation Paths (Debug Version)",

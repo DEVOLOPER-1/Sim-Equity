@@ -12,7 +12,6 @@
 
 import os
 import time
-import traceback
 import warnings
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -721,14 +720,7 @@ class EvacuationAgent(ap.Agent):
         self, step: Optional[int] = None, force_add: bool = False
     ) -> bool:
         """
-        Add current position to movement history for tracking and analysis.
-
-        Args:
-            step (Optional[int]): Simulation step number
-            force_add (bool): Force addition even if position unchanged
-
-        Returns:
-            bool: True if position was added, False otherwise
+        Add current position to movement history with enhanced evacuation area tracking.
         """
         try:
             if step is None:
@@ -739,23 +731,47 @@ class EvacuationAgent(ap.Agent):
                 current_time = current_time.isoformat()
 
             # Get current coordinates
-            x, y = self._get_current_coordinates()
-            if x is None or y is None and not force_add:
+            lat, lon = self._get_current_coordinates()
+            if lat is None or lon is None and not force_add:
                 return False
 
-            # Create history entry
+            # Check evacuation area status with debugging
+            in_evacuation_area = None
+            if lat is not None and lon is not None:
+                in_evacuation_area = self.model.is_pos_in_evacuation_area(
+                    (lat, lon), if_lat_lon=True, debug_agent_id=self.unique_id
+                )
+
+            # Calculate distance traveled (if previous position exists)
+            distance_traveled = 0.0
+            if len(self.path_history) > 0:
+                prev_entry = self.path_history[-1]
+                prev_lat, prev_lon = prev_entry.get("y"), prev_entry.get("x")
+                if prev_lat and prev_lon and lat and lon:
+                    distance_traveled = haversine(
+                        (prev_lat, prev_lon), (lat, lon), unit="m"
+                    )
+
+            # Create enhanced history entry
             history_entry = {
                 "step": step,
                 "time": current_time,
-                "x": float(x) if x is not None else None,
-                "y": float(y) if y is not None else None,
+                "x": float(lon) if lon is not None else None,
+                "y": float(lat) if lat is not None else None,
                 "mode": getattr(self, "main_mode", "UNKNOWN"),
                 "status": getattr(self, "status", "UNKNOWN"),
                 "using_public_transport": getattr(
                     self, "using_public_transport", False
                 ),
                 "current_segment": getattr(self, "current_journey_segment", 0),
-                "evacuation_time": getattr(self, "evacuation_time", 0.0),
+                "evacuation_time_seconds": getattr(self, "evacuation_time", 0.0),
+                "evacuation_time_minutes": getattr(self, "evacuation_time", 0.0) / 60.0,
+                "in_evacuation_area": in_evacuation_area,
+                "distance_traveled_m": distance_traveled,
+                # Transit-specific tracking
+                "current_route": getattr(self, "current_route_id", None),
+                "current_stop": getattr(self, "current_stop_id", None),
+                "wait_time_seconds": getattr(self, "current_wait_time", 0.0),
             }
 
             self.path_history.append(history_entry)
@@ -921,7 +937,8 @@ class EvacuationModel(ap.Model):
             self.step_seconds = base_step_seconds
 
     def _initialize_data_structures(self) -> None:
-        """Initialize data collection structures."""
+        """Initialize data collection structures with enhanced journey tracking."""
+        # Main agent summary DataFrame
         self.agent_paths_df = pl.DataFrame(
             schema={
                 "agent_id": pl.Utf8,
@@ -929,7 +946,8 @@ class EvacuationModel(ap.Model):
                 "original_mode": pl.Utf8,
                 "final_mode": pl.Utf8,
                 "status": pl.Utf8,
-                "evacuation_time": pl.Float32,
+                "evacuation_time_minutes": pl.Float32,  # Changed to minutes for clarity
+                "total_distance_m": pl.Float32,
                 "start_lat": pl.Float64,
                 "start_lon": pl.Float64,
                 "end_lat": pl.Float64,
@@ -939,6 +957,39 @@ class EvacuationModel(ap.Model):
                 "arrived_at": pl.Utf8,
                 "used_public_transport": pl.Boolean,
                 "segments_completed": pl.Int32,
+                "total_segments": pl.Int32,
+                "start_in_evacuation_area": pl.Boolean,
+                "end_in_evacuation_area": pl.Boolean,
+                # Transit-specific fields
+                "total_wait_time_minutes": pl.Float32,
+                "total_transit_time_minutes": pl.Float32,
+                "total_walking_time_minutes": pl.Float32,
+                "stations_visited": pl.Utf8,  # JSON string of station details
+                "routes_taken": pl.Utf8,  # JSON string of route information
+            }
+        )
+
+        # Detailed journey segments DataFrame for transit users
+        self.journey_segments_df = pl.DataFrame(
+            schema={
+                "agent_id": pl.Utf8,
+                "segment_index": pl.Int32,
+                "transport_mode": pl.Utf8,
+                "departure_time": pl.Utf8,
+                "arrival_time": pl.Utf8,
+                "travel_time_minutes": pl.Float32,
+                "wait_time_minutes": pl.Float32,
+                "distance_m": pl.Float32,
+                "start_stop_id": pl.Utf8,
+                "end_stop_id": pl.Utf8,
+                "route_id": pl.Utf8,
+                "agency_id": pl.Utf8,
+                "feed": pl.Utf8,
+                "start_lat": pl.Float64,
+                "start_lon": pl.Float64,
+                "end_lat": pl.Float64,
+                "end_lon": pl.Float64,
+                "geometry_wkt": pl.Utf8,
             }
         )
 
@@ -1379,289 +1430,227 @@ class EvacuationModel(ap.Model):
             traceback.print_exc()
             return None
 
-    def process_r5py_journey(self, journey_df: Any) -> List[Dict[str, Any]]:
+    def process_r5py_journey(
+        self, journey_df: Any, agent_id: str = None
+    ) -> List[Dict[str, Any]]:
         """
-        Convert R5py journey GeoDataFrame to internal segment format.
-
-        Expected journey_df columns (typical r5py output):
-            ["from_id", "to_id", "option", "segment", "transport_mode", "departure_time",
-             "distance", "travel_time", "wait_time", "feed", "agency_id", "route_id",
-             "start_stop_id", "end_stop_id", "geometry"]
-
-        Returns:
-            List[Dict[str, Any]]: ordered list of segments for the chosen itinerary option
+        Convert R5py journey GeoDataFrame to internal segment format with enhanced data collection.
         """
         segments: List[Dict[str, Any]] = []
 
         try:
-            # Normalize to pandas/GeoDataFrame if possible
-            # (r5py DetailedItineraries often returns a GeoDataFrame-like object)
             if journey_df is None:
                 return segments
 
-            # If polars or custom object: try to convert to pandas
+            # Convert to pandas if needed
             to_pandas = getattr(journey_df, "to_pandas", None)
             if callable(to_pandas):
                 try:
                     journey_pd = to_pandas()
                 except Exception:
-                    journey_pd = journey_df  # fallback to original
+                    journey_pd = journey_df
             else:
                 journey_pd = journey_df
 
-            # If it's a GeoDataFrame-like, ensure it's a pandas DataFrame for row ops
             if isinstance(journey_pd, gpd.GeoDataFrame) or hasattr(
                 journey_pd, "columns"
             ):
-                # use as-is
                 pass
             else:
-                # Try to coerce to pandas.DataFrame
                 try:
                     journey_pd = pd.DataFrame(journey_pd)
                 except Exception:
-                    # give up and return empty
                     return segments
 
-            # Empty check
             if getattr(journey_pd, "empty", False) or len(journey_pd) == 0:
                 return segments
 
-            # Choose the "best" itinerary option:
-            # r5py often returns an 'option' column; pick the option value from the first row.
-            first_row = None
-            try:
-                first_row = journey_pd.iloc[0]
-            except Exception:
-                # if .iloc fails, try alternative access
-                try:
-                    first_row = journey_pd.row(0, named=True)
-                except Exception:
-                    # last resort: convert to pandas again
-                    journey_pd = pd.DataFrame(journey_pd)
-                    if len(journey_pd) == 0:
-                        return segments
-                    first_row = journey_pd.iloc[0]
-
+            # Choose best itinerary option
+            first_row = journey_pd.iloc[0]
             chosen_option = None
             if "option" in journey_pd.columns:
                 try:
                     chosen_option = int(first_row.get("option", first_row["option"]))
                 except Exception:
-                    # fallback: take the smallest option number if present
                     try:
                         chosen_option = int(journey_pd["option"].min())
                     except Exception:
                         chosen_option = None
 
-            # CASE A: nested segments field in the first row (named 'segment' or 'segments')
-            segments_field = None
-            if "segments" in journey_pd.columns:
-                segments_field = (
-                    first_row.get("segments", None)
-                    if hasattr(first_row, "get")
-                    else first_row["segments"]
-                )
-            elif "segment" in journey_pd.columns:
-                segments_field = (
-                    first_row.get("segment", None)
-                    if hasattr(first_row, "get")
-                    else first_row["segment"]
-                )
-
-            if segments_field:
-                # segments_field should be an iterable of segment dicts/objects
-                for seg in segments_field:
-                    # allow seg to be dict-like or object with attributes
-                    def seg_get(k, default=None):
-                        if isinstance(seg, dict):
-                            return seg.get(k, default)
-                        if hasattr(seg, "get"):
-                            return seg.get(k, default)
-                        return getattr(seg, k, default)
-
-                    seg_mode = seg_get("mode", seg_get("transport_mode", "WALK"))
-                    duration = seg_get("duration", seg_get("travel_time", 0))
-                    distance = seg_get("distance", 0)
-                    geom_val = seg_get("geometry", None)
-                    dep = seg_get("departure_time", None)
-                    arr = seg_get("arrival_time", None)
-
-                    # parse WKT geometry if string
-                    geom = None
-                    if geom_val is not None:
-                        try:
-                            if isinstance(geom_val, str):
-                                geom = wkt.loads(geom_val)
-                            else:
-                                geom = geom_val
-                        except Exception:
-                            geom = None
-
-                    # Convert duration to seconds if it's a timedelta
-                    duration_seconds = 0.0
-                    if duration is not None:
-                        if hasattr(duration, "total_seconds"):
-                            duration_seconds = float(duration.total_seconds())
-                        else:
-                            duration_seconds = float(duration)
-
-                    segments.append(
-                        {
-                            "mode": (
-                                str(seg_mode).upper()
-                                if seg_mode is not None
-                                else "WALK"
-                            ),
-                            "duration": duration_seconds,  # Always in seconds
-                            "distance": (
-                                float(distance) if distance is not None else 0.0
-                            ),
-                            "geometry": geom,
-                            "departure_time": dep,
-                            "arrival_time": arr,
-                        }
-                    )
-
-                # Process segments for validation and fixes
-                segments = self._validate_and_fix_segments(segments)
-                return segments
-
-            # CASE B: each row is a segment. Filter rows by chosen_option if available.
-            # If chosen_option is None, use all rows but prefer rows near the first row's 'option'.
+            # Filter by chosen option if available
             df_segments = journey_pd
             if chosen_option is not None and "option" in df_segments.columns:
                 try:
                     df_segments = df_segments[df_segments["option"] == chosen_option]
                 except Exception:
-                    # fallback to original df
                     df_segments = journey_pd
 
-            # If there are no rows after filtering, return empty
             if getattr(df_segments, "empty", False) or len(df_segments) == 0:
                 return segments
 
-            # Build segments list from rows. Keep order by departure_time if present, else by index.
+            # Sort by departure time if available
             if "departure_time" in df_segments.columns:
                 try:
                     df_segments = df_segments.sort_values("departure_time")
                 except Exception:
                     pass
 
-            # Iterate rows and map columns to our segment format
-            for _, row in df_segments.iterrows():
+            # Process each segment with enhanced data extraction
+            for idx, row in df_segments.iterrows():
                 try:
-                    mode = None
-                    if "transport_mode" in df_segments.columns:
-                        mode = (
-                            row.get("transport_mode", None)
-                            if hasattr(row, "get")
-                            else row["transport_mode"]
-                        )
-                    if not mode and "transport_mode" in row:
-                        mode = row["transport_mode"]
-                    if not mode:
-                        mode = (
-                            row.get("mode", "WALK")
-                            if hasattr(row, "get")
-                            else row.get("mode", "WALK")
-                        )
-
-                    duration = None
-                    if "travel_time" in df_segments.columns:
-                        duration = (
-                            row.get("travel_time", None)
-                            if hasattr(row, "get")
-                            else row["travel_time"]
-                        )
-                    if duration is None and "duration" in df_segments.columns:
-                        duration = (
-                            row.get("duration", 0)
-                            if hasattr(row, "get")
-                            else row["duration"]
-                        )
-
-                    distance = (
-                        row.get("distance", None)
-                        if "distance" in df_segments.columns
-                        else None
-                    )
-                    geom_val = (
-                        row.geometry
-                        if hasattr(row, "geometry")
-                        else (
-                            row.get("geometry", None) if hasattr(row, "get") else None
-                        )
-                    )
-                    dep = (
-                        row.get("departure_time", None)
-                        if "departure_time" in df_segments.columns
-                        else None
-                    )
-                    arr = (
-                        row.get("arrival_time", None)
-                        if "arrival_time" in df_segments.columns
-                        else None
+                    # Extract core transport information
+                    transport_mode = self._extract_field(
+                        row, df_segments, ["transport_mode", "mode"], "WALK"
                     )
 
-                    # parse geometry if WKT string
-                    geom = None
-                    if geom_val is not None:
-                        try:
-                            if isinstance(geom_val, str):
-                                geom = wkt.loads(geom_val)
-                            else:
-                                geom = geom_val
-                        except Exception:
-                            geom = None
-
-                    # Convert duration to seconds
-                    duration_seconds = 0.0
-                    if duration is not None:
-                        if hasattr(duration, "total_seconds"):
-                            duration_seconds = float(duration.total_seconds())
-                        else:
-                            duration_seconds = float(duration)
-
-                    segments.append(
-                        {
-                            "mode": str(mode).upper() if mode is not None else "WALK",
-                            "duration": duration_seconds,  # Always in seconds
-                            "distance": (
-                                float(distance) if distance is not None else 0.0
-                            ),
-                            "geometry": geom,
-                            "departure_time": dep,
-                            "arrival_time": arr,
-                        }
+                    # Extract timing information
+                    departure_time = self._extract_field(
+                        row, df_segments, ["departure_time"], None
                     )
-                except Exception:
-                    # skip a problematic row but continue processing others
-                    traceback.print_exc()
+                    travel_time = self._extract_field(
+                        row, df_segments, ["travel_time", "duration"], 0
+                    )
+                    wait_time = self._extract_field(row, df_segments, ["wait_time"], 0)
+                    distance = self._extract_field(row, df_segments, ["distance"], 0)
+
+                    # Extract transit-specific information
+                    start_stop_id = self._extract_field(
+                        row, df_segments, ["start_stop_id"], None
+                    )
+                    end_stop_id = self._extract_field(
+                        row, df_segments, ["end_stop_id"], None
+                    )
+                    route_id = self._extract_field(row, df_segments, ["route_id"], None)
+                    agency_id = self._extract_field(
+                        row, df_segments, ["agency_id"], None
+                    )
+                    feed = self._extract_field(row, df_segments, ["feed"], None)
+
+                    # Extract geometry
+                    geometry = self._extract_geometry(row, df_segments)
+
+                    # Extract coordinates from geometry if available
+                    start_coords, end_coords = self._extract_coordinates_from_geometry(
+                        geometry
+                    )
+
+                    # Convert timing to consistent format (seconds)
+                    travel_time_seconds = self._convert_to_seconds(travel_time)
+                    wait_time_seconds = self._convert_to_seconds(wait_time)
+
+                    # Create enhanced segment
+                    segment = {
+                        "mode": (
+                            str(transport_mode).upper() if transport_mode else "WALK"
+                        ),
+                        "duration": travel_time_seconds,  # Travel time in seconds
+                        "wait_duration": wait_time_seconds,  # Wait time in seconds
+                        "distance": float(distance) if distance else 0.0,
+                        "geometry": geometry,
+                        "departure_time": departure_time,
+                        # Transit-specific data
+                        "start_stop_id": start_stop_id,
+                        "end_stop_id": end_stop_id,
+                        "route_id": route_id,
+                        "agency_id": agency_id,
+                        "feed": feed,
+                        # Coordinates
+                        "start_coords": start_coords,
+                        "end_coords": end_coords,
+                        # Metadata
+                        "segment_index": len(segments),
+                        "raw_data": (
+                            dict(row) if hasattr(row, "to_dict") else str(row)[:200]
+                        ),  # Store raw data for debugging
+                    }
+
+                    segments.append(segment)
+
+                except Exception as e:
+                    print(
+                        f"Error processing segment {len(segments)} for agent {agent_id}: {e}"
+                    )
                     continue
 
-            # Process segments for validation and fixes
-            segments = self._validate_and_fix_segments(segments)
+            # Validate and enhance segments
+            segments = self._validate_and_fix_segments(
+                segments, agent_id
+            )  # TODO: CHECKS
 
-            # After processing segments, identify waiting periods
-            for i, segment in enumerate(segments):
-                if segment.get("mode") == "TRANSIT" and i > 0:
-                    # Check if there's a waiting period before this transit segment
-                    prev_segment = segments[i - 1]
-                    if prev_segment.get("mode") == "WALK" and "end_stop_id" in segment:
-                        # This walk segment likely represents waiting at a stop
-                        prev_segment["mode"] = "WAIT"
-                        prev_segment["waiting_for"] = segment.get("route_id", "TRANSIT")
+            if agent_id:
+                print(f"Agent {agent_id}: Processed {len(segments)} journey segments")
+                for i, seg in enumerate(segments):
+                    print(
+                        f"  Segment {i+1}: {seg['mode']} - {seg['duration']:.0f}s travel, {seg['wait_duration']:.0f}s wait"
+                    )
 
             return segments
 
         except Exception as e:
-            print(f"Error processing R5py journey: {e}")
+            print(f"Error processing R5py journey for agent {agent_id}: {e}")
+            import traceback
+
             traceback.print_exc()
             return []
 
+    # 4. Helper methods for data extraction
+    def _extract_field(self, row, df, field_names: List[str], default=None):
+        """Extract field value from row using multiple possible field names."""
+        for field in field_names:
+            if field in df.columns:
+                try:
+                    value = row.get(field) if hasattr(row, "get") else row[field]
+                    if value is not None:
+                        return value
+                except (KeyError, AttributeError):
+                    continue
+        return default
+
+    def _extract_geometry(self, row, df):
+        """Extract geometry from row."""
+        if "geometry" in df.columns:
+            try:
+                geom_val = (
+                    row.geometry if hasattr(row, "geometry") else row.get("geometry")
+                )
+                if geom_val is not None:
+                    if isinstance(geom_val, str):
+                        return wkt.loads(geom_val)
+                    else:
+                        return geom_val
+            except Exception:
+                pass
+        return None
+
+    def _extract_coordinates_from_geometry(self, geometry):
+        """Extract start and end coordinates from geometry."""
+        start_coords, end_coords = None, None
+        if geometry and hasattr(geometry, "coords"):
+            try:
+                coords = list(geometry.coords)
+                if coords:
+                    # Geometry coords are (lon, lat), convert to (lat, lon)
+                    start_coords = (coords[0][1], coords[0][0])
+                    end_coords = (coords[-1][1], coords[-1][0])
+            except Exception:
+                pass
+        return start_coords, end_coords
+
+    def _convert_to_seconds(self, duration):
+        """Convert duration to seconds handling various formats."""
+        if duration is None:
+            return 0.0
+
+        if hasattr(duration, "total_seconds"):
+            return float(duration.total_seconds())
+
+        try:
+            return float(duration)
+        except (ValueError, TypeError):
+            return 0.0
+
     def _validate_and_fix_segments(
-        self, segments: List[Dict[str, Any]]
+        self, segments: List[Dict[str, Any]], agent_id
     ) -> List[Dict[str, Any]]:
         """
         Validate and fix journey segments for realistic simulation.
@@ -1738,7 +1727,7 @@ class EvacuationModel(ap.Model):
             # Add segment validation info
             segment["segment_index"] = i
             segment["is_final_segment"] = i == len(segments) - 1
-
+            # segment["agent_id"] = agent_id
             fixed_segments.append(segment)
 
         # Calculate total journey time
@@ -1752,26 +1741,59 @@ class EvacuationModel(ap.Model):
     # --- HELPER METHODS (API FOR AGENTS) ---
 
     def is_pos_in_evacuation_area(
-        self, pos: Tuple[float, float], if_lat_lon: bool = True
+        self,
+        pos: Tuple[float, float],
+        if_lat_lon: bool = True,
+        debug_agent_id: str = None,
     ) -> bool:
         """
-        Check if position is inside evacuation polygon.
+        Check if position is inside evacuation polygon with enhanced debugging.
 
         Args:
             pos (Tuple[float, float]): Position coordinates
             if_lat_lon (bool): True if pos is (lat, lon), False if (lon, lat)
+            debug_agent_id (str): Agent ID for debugging output
 
         Returns:
             bool: True if position is inside evacuation area
         """
-        if if_lat_lon:
-            # Convert (lat, lon) to (lon, lat) for Shapely
-            lon, lat = pos[1], pos[0]
-        else:
-            # Already in (lon, lat) format
-            lon, lat = pos[0], pos[1]
+        try:
+            if if_lat_lon:
+                lat, lon = pos[0], pos[1]
+            else:
+                lon, lat = pos[1], pos[0]
 
-        return self.evac_polygon.contains(Point(lon, lat))
+            # Validate coordinates
+            if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+                if debug_agent_id:
+                    print(
+                        f"WARNING: Invalid coordinates for agent {debug_agent_id}: lat={lat}, lon={lon}"
+                    )
+                return False
+
+            # Create point (Shapely expects lon, lat)
+            point = Point(lon, lat)
+
+            # Check if point is in evacuation polygon
+            is_inside = self.evac_polygon.contains(point)
+
+            # Debug output for specific cases
+            if (
+                debug_agent_id
+                and hasattr(self, "debug_evacuation_checks")
+                and self.debug_evacuation_checks
+            ):
+                print(
+                    f"Evacuation check for agent {debug_agent_id}: "
+                    f"pos=({lat:.6f}, {lon:.6f}), inside={is_inside}"
+                )
+
+            return is_inside
+
+        except Exception as e:
+            if debug_agent_id:
+                print(f"Error checking evacuation area for agent {debug_agent_id}: {e}")
+            return False
 
     def is_node_in_evacuation_area(self, node_id: int, mode: str) -> bool:
         """
@@ -2130,6 +2152,8 @@ class EvacuationModel(ap.Model):
         mode_mapping = {
             "CAR": "CAR",
             "DRIVE": "CAR",
+            "PRIV_CAR_DRIVER": "CAR",
+            "PRIV_CAR_PASSENGER": "CAR",
             "WALKING": "WALKING",
             "WALK": "WALKING",
             "BIKE": "BIKE",
@@ -2140,195 +2164,428 @@ class EvacuationModel(ap.Model):
 
     def collect_agent_paths_data(self) -> pl.DataFrame:
         """
-        Collect path history data from all agents into the Polars DataFrame.
-        FIXED: Proper status validation, position tracking, and evacuation area verification.
+        Collect comprehensive agent data including detailed journey information.
+        FIXED: Proper type handling for DataFrame creation
         """
-        print("Collecting agent path history data...")
+        print("Collecting enhanced agent path and journey data...")
 
-        # Create lists for each column
-        agent_ids = []
-        svi_values = []
-        original_modes = []
-        final_modes = []
-        statuses = []
-        evac_times = []
-        start_lats = []
-        start_lons = []
-        end_lats = []
-        end_lons = []
-        fail_reasons = []
-        started_ats = []
-        arrived_ats = []
-        used_public_transports = []
-        segments_completed = []
+        # Initialize data collectors
+        agent_summary_data = []
+        journey_segments_data = []
 
-        # Ensure the traces directory exists
+        # Ensure output directories exist
         traces_dir = "simulation_outcomes/agents_traces"
         os.makedirs(traces_dir, exist_ok=True)
 
-        # Debug: Count agents with path history
-        agents_with_history = sum(
-            1
-            for agent in self.agents
-            if hasattr(agent, "path_history") and agent.path_history
-        )
-        print(
-            f"Debug: {agents_with_history} out of {len(self.agents)} agents have path history"
-        )
+        # Enable debugging for evacuation area checks
+        self.debug_evacuation_checks = True
 
-        # Collect data from all agents
-        for agent in self.agents:
-            # Initialize variables for this agent
-            start_lat, start_lon, end_lat, end_lon = None, None, None, None
-            started_at, arrived_at = None, None
-            used_public_transport = getattr(agent, "using_public_transport", False)
-            original_mode = getattr(
-                agent, "original_mode", getattr(agent, "main_mode", "UNKNOWN")
+        # Process each agent
+        for i, agent in enumerate(self.agents):
+            try:
+                agent_data = self._collect_agent_summary(agent)
+                agent_summary_data.append(agent_data)
+
+                # Collect detailed journey segments for transit users
+                if getattr(agent, "using_public_transport", False):
+                    segments_data = self._collect_agent_journey_segments(agent)
+                    journey_segments_data.extend(segments_data)
+
+                # Write individual trace
+                self._write_agent_trace(agent, traces_dir, i)
+
+            except Exception as e:
+                print(f"Error collecting data for agent {agent.unique_id}: {e}")
+                import traceback
+
+                traceback.print_exc()
+
+        # FIXED: Validate and clean journey segments data before creating DataFrame
+        validated_journey_segments = []
+        for segment in journey_segments_data:
+            try:
+                # Create a cleaned segment dict with proper type conversion
+                cleaned_segment = {}
+
+                # Handle string fields
+                for field in [
+                    "agent_id",
+                    "transport_mode",
+                    "departure_time",
+                    "arrival_time",
+                    "start_stop_id",
+                    "end_stop_id",
+                    "route_id",
+                    "agency_id",
+                    "feed",
+                    "geometry_wkt",
+                ]:
+                    value = segment.get(field)
+                    cleaned_segment[field] = str(value) if value is not None else None
+
+                # Handle integer fields with explicit conversion
+                for field in ["segment_index"]:
+                    value = segment.get(field)
+                    if value is not None:
+                        try:
+                            cleaned_segment[field] = int(
+                                float(value)
+                            )  # Convert via float to handle string numbers
+                        except (ValueError, TypeError):
+                            cleaned_segment[field] = 0  # Default value
+                    else:
+                        cleaned_segment[field] = 0
+
+                # Handle float fields with explicit conversion
+                for field in [
+                    "travel_time_minutes",
+                    "wait_time_minutes",
+                    "distance_m",
+                    "start_lat",
+                    "start_lon",
+                    "end_lat",
+                    "end_lon",
+                ]:
+                    value = segment.get(field)
+                    if value is not None:
+                        try:
+                            cleaned_segment[field] = float(value)
+                        except (ValueError, TypeError):
+                            cleaned_segment[field] = 0.0  # Default value
+                    else:
+                        cleaned_segment[field] = (
+                            None  # Allow None for coordinate fields
+                        )
+
+                validated_journey_segments.append(cleaned_segment)
+
+            except Exception as e:
+                print(f"Error validating segment data: {segment}")
+                print(f"Validation error: {e}")
+                continue
+
+        # Create DataFrames with proper error handling
+        try:
+            self.agent_paths_df = (
+                pl.DataFrame(agent_summary_data)
+                if agent_summary_data
+                else pl.DataFrame()
             )
-            final_mode = getattr(agent, "main_mode", "UNKNOWN")
-            segments_completed_count = 0
+        except Exception as e:
+            print(f"Error creating agent_paths_df: {e}")
+            self.agent_paths_df = pl.DataFrame()
 
-            # CRITICAL FIX: Validate agent status before data collection
-            self._validate_agent_final_status(agent)
-
-            # Process path history if available
-            if hasattr(agent, "path_history") and agent.path_history:
-                print(
-                    f"Agent {agent.id}: Has {len(agent.path_history)} path history entries"
-                )
-
-                # Write individual trace CSV for this agent
-                if len(agent.path_history) >= 1:
-                    try:
-                        # Add additional debugging info to trace
-                        enriched_history = []
-                        for entry in agent.path_history:
-                            enriched_entry = entry.copy()
-                            # Add evacuation area status for each position
-                            if entry.get("y") and entry.get("x"):
-                                pos = (entry["y"], entry["x"])  # (lat, lon)
-                                enriched_entry["in_evacuation_area"] = (
-                                    self.is_pos_in_evacuation_area(pos, if_lat_lon=True)
-                                )
-                            else:
-                                enriched_entry["in_evacuation_area"] = None
-                            enriched_history.append(enriched_entry)
-
-                        his_df = pl.DataFrame(enriched_history)
-                        trace_file = f"{traces_dir}/{agent.unique_id}.csv"
-                        his_df.write_csv(trace_file)
-                        print(
-                            f"Written trace for agent {agent.unique_id} ({len(agent.path_history)} entries)"
-                        )
-                    except Exception as e:
-                        print(f"Error writing trace for agent {agent.unique_id}: {e}")
-                        import traceback
-
-                        traceback.print_exc()
-
-                # Extract start position (first entry)
-                if len(agent.path_history) > 0:
-                    first_entry = agent.path_history[0]
-                    start_lat = first_entry.get("y")
-                    start_lon = first_entry.get("x")
-                    started_at = first_entry.get("time")
-                    if isinstance(started_at, datetime):
-                        started_at = started_at.isoformat()
-
-                # Extract end position (last entry)
-                if len(agent.path_history) > 0:
-                    last_entry = agent.path_history[-1]
-                    end_lat = last_entry.get("y")
-                    end_lon = last_entry.get("x")
-                    arrived_at = last_entry.get("time")
-                    if isinstance(arrived_at, datetime):
-                        arrived_at = arrived_at.isoformat()
-
-                    # CRITICAL FIX: Verify the end position makes sense
-                    if end_lat and end_lon:
-                        end_pos = (end_lat, end_lon)
-                        is_end_in_evac_area = self.is_pos_in_evacuation_area(
-                            end_pos, if_lat_lon=True
-                        )
-
-                        # Log position validation
-                        print(
-                            f"Agent {agent.unique_id}: Final position ({end_lat:.6f}, {end_lon:.6f}), "
-                            f"In evacuation area: {is_end_in_evac_area}, Status: {agent.status}"
-                        )
-
-                        # Check for suspicious "ARRIVED" agents still in evacuation area
-                        if agent.status == "ARRIVED" and is_end_in_evac_area:
-                            print(
-                                f"WARNING: Agent {agent.unique_id} marked as ARRIVED but final position is in evacuation area!"
-                            )
-                            # Re-validate this agent's status
-                            agent.status = "FAILED"
-                            agent.fail_reason = "Final position verification failed - still in evacuation area"
-
-            else:
-                print(f"Agent {agent.id}: No path history available")
-                # For agents with no path history, try to get their current position
-                if hasattr(agent, "current_pos_node") and agent.current_pos_node:
-                    coords = self.get_node_coordinates(
-                        agent.current_pos_node, agent.main_mode
-                    )
-                    if coords:
-                        start_lat, start_lon = coords
-                        end_lat, end_lon = coords  # Same position if no movement
-
-            # Calculate segments completed for multi-modal agents
-            if used_public_transport and hasattr(agent, "current_journey_segment"):
-                segments_completed_count = getattr(agent, "current_journey_segment", 0)
-                total_segments = len(getattr(agent, "journey_plan", []))
-                if total_segments > 0:
-                    segments_completed_count = min(
-                        segments_completed_count, total_segments
-                    )
-
-            # Append data to lists
-            agent_ids.append(agent.unique_id)
-            svi_values.append(getattr(agent, "svi", None))
-            original_modes.append(original_mode)
-            final_modes.append(final_mode)
-            statuses.append(getattr(agent, "status", None))
-            evac_times.append(getattr(agent, "evacuation_time", 0))
-            start_lats.append(start_lat)
-            start_lons.append(start_lon)
-            end_lats.append(end_lat)
-            end_lons.append(end_lon)
-            fail_reasons.append(getattr(agent, "fail_reason", None))
-            started_ats.append(started_at)
-            arrived_ats.append(arrived_at)
-            used_public_transports.append(used_public_transport)
-            segments_completed.append(segments_completed_count)
-
-        # Create DataFrame from collected data
-        self.agent_paths_df = pl.DataFrame(
-            data={
-                "agent_id": agent_ids,
-                "svi": svi_values,
-                "original_mode": original_modes,
-                "final_mode": final_modes,
-                "status": statuses,
-                "evacuation_time": evac_times,
-                "start_lat": start_lats,
-                "start_lon": start_lons,
-                "end_lat": end_lats,
-                "end_lon": end_lons,
-                "fail_reason": fail_reasons,
-                "started_at": started_ats,
-                "arrived_at": arrived_ats,
-                "used_public_transport": used_public_transports,
-                "segments_completed": segments_completed,
-            }
-        )
+        try:
+            self.journey_segments_df = (
+                pl.DataFrame(validated_journey_segments)
+                if validated_journey_segments
+                else pl.DataFrame()
+            )
+        except Exception as e:
+            print(f"Error creating journey_segments_df: {e}")
+            print(
+                f"Sample problematic data: {validated_journey_segments[:2] if validated_journey_segments else 'No data'}"
+            )
+            self.journey_segments_df = pl.DataFrame()
 
         # Generate summary statistics
-        self._generate_collection_summary()
+        self._generate_enhanced_summary()
 
-        print(f"Collected path data for {len(agent_ids)} agents")
+        print(f"Collected data for {len(agent_summary_data)} agents")
+        print(f"Collected {len(validated_journey_segments)} journey segments")
+
         return self.agent_paths_df
+
+    def _collect_agent_summary(self, agent) -> Dict[str, Any]:
+        """Collect comprehensive summary data for an agent."""
+        import json
+
+        # Validate final status
+        try:
+            self._validate_agent_final_status(agent)
+        except Exception as e:
+            print(
+                f"Warning: Could not validate final status for agent {agent.unique_id}: {e}"
+            )
+
+        # Extract basic information
+        start_lat, start_lon, end_lat, end_lon = None, None, None, None
+        started_at, arrived_at = None, None
+        total_distance = 0.0
+
+        # Process path history
+        if hasattr(agent, "path_history") and agent.path_history:
+            # Start position and time
+            first_entry = agent.path_history[0]
+            start_lat = first_entry.get("y")
+            start_lon = first_entry.get("x")
+            started_at = first_entry.get("time")
+
+            # End position and time
+            last_entry = agent.path_history[-1]
+            end_lat = last_entry.get("y")
+            end_lon = last_entry.get("x")
+            arrived_at = last_entry.get("time")
+
+            # Calculate total distance
+            for i in range(len(agent.path_history)):
+                total_distance += agent.path_history[i].get("distance_traveled_m", 0.0)
+
+        # Check evacuation area status for start and end positions
+        start_in_evac = None
+        end_in_evac = None
+
+        if start_lat and start_lon:
+            try:
+                start_in_evac = self.is_pos_in_evacuation_area(
+                    (start_lat, start_lon),
+                    if_lat_lon=True,
+                    debug_agent_id=agent.unique_id,
+                )
+            except Exception as e:
+                print(
+                    f"Warning: Could not check start evacuation status for agent {agent.unique_id}: {e}"
+                )
+                start_in_evac = None
+
+        if end_lat and end_lon:
+            try:
+                end_in_evac = self.is_pos_in_evacuation_area(
+                    (end_lat, end_lon), if_lat_lon=True, debug_agent_id=agent.unique_id
+                )
+            except Exception as e:
+                print(
+                    f"Warning: Could not check end evacuation status for agent {agent.unique_id}: {e}"
+                )
+                end_in_evac = None
+
+        # Calculate transit-specific metrics
+        try:
+            transit_data = self._calculate_transit_metrics(agent)
+        except Exception as e:
+            print(
+                f"Warning: Could not calculate transit metrics for agent {agent.unique_id}: {e}"
+            )
+            transit_data = {
+                "total_wait_time": 0.0,
+                "total_transit_time": 0.0,
+                "total_walking_time": 0.0,
+                "stations": [],
+                "routes": [],
+            }
+
+        return {
+            "agent_id": str(agent.unique_id),
+            "svi": float(getattr(agent, "svi", 0.0)),
+            "original_mode": str(
+                getattr(agent, "original_mode", getattr(agent, "main_mode", "UNKNOWN"))
+            ),
+            "final_mode": str(getattr(agent, "main_mode", "UNKNOWN")),
+            "status": str(getattr(agent, "status", "UNKNOWN")),
+            "evacuation_time_minutes": float(getattr(agent, "evacuation_time", 0.0))
+            / 60.0,
+            "total_distance_m": float(total_distance),
+            "start_lat": float(start_lat) if start_lat is not None else None,
+            "start_lon": float(start_lon) if start_lon is not None else None,
+            "end_lat": float(end_lat) if end_lat is not None else None,
+            "end_lon": float(end_lon) if end_lon is not None else None,
+            "fail_reason": (
+                str(getattr(agent, "fail_reason", ""))
+                if getattr(agent, "fail_reason", None)
+                else None
+            ),
+            "started_at": str(started_at) if started_at else None,
+            "arrived_at": str(arrived_at) if arrived_at else None,
+            "used_public_transport": bool(
+                getattr(agent, "using_public_transport", False)
+            ),
+            "segments_completed": int(getattr(agent, "current_journey_segment", 0)),
+            "total_segments": int(len(getattr(agent, "journey_plan", []))),
+            "start_in_evacuation_area": start_in_evac,
+            "end_in_evacuation_area": end_in_evac,
+            # Transit metrics
+            "total_wait_time_minutes": float(transit_data["total_wait_time"]) / 60.0,
+            "total_transit_time_minutes": float(transit_data["total_transit_time"])
+            / 60.0,
+            "total_walking_time_minutes": float(transit_data["total_walking_time"])
+            / 60.0,
+            "stations_visited": json.dumps(transit_data["stations"]),
+            "routes_taken": json.dumps(transit_data["routes"]),
+        }
+
+    def _calculate_transit_metrics(self, agent) -> Dict[str, Any]:
+        """Calculate detailed transit usage metrics for an agent."""
+        metrics = {
+            "total_wait_time": 0.0,
+            "total_transit_time": 0.0,
+            "total_walking_time": 0.0,
+            "stations": [],
+            "routes": [],
+        }
+
+        if not getattr(agent, "using_public_transport", False):
+            return metrics
+
+        journey_plan = getattr(agent, "journey_plan", [])
+        for segment in journey_plan:
+            mode = segment.get("mode", "").upper()
+            duration = segment.get("duration", 0)
+            wait_duration = segment.get("wait_duration", 0)
+
+            if mode in ["WAIT", "TRANSIT_WAIT"]:
+                metrics["total_wait_time"] += wait_duration
+            elif mode in ["TRANSIT", "BUS", "TRAIN", "METRO", "SUBWAY"]:
+                metrics["total_transit_time"] += duration
+                # Collect route information
+                if segment.get("route_id"):
+                    route_info = {
+                        "route_id": segment.get("route_id"),
+                        "agency_id": segment.get("agency_id"),
+                        "start_stop": segment.get("start_stop_id"),
+                        "end_stop": segment.get("end_stop_id"),
+                        "duration_minutes": duration / 60.0,
+                    }
+                    metrics["routes"].append(route_info)
+            elif mode in ["WALK", "WALKING"]:
+                metrics["total_walking_time"] += duration
+
+            # Collect station information
+            if segment.get("start_stop_id") or segment.get("end_stop_id"):
+                for stop_id in [
+                    segment.get("start_stop_id"),
+                    segment.get("end_stop_id"),
+                ]:
+                    if stop_id and stop_id not in [
+                        s.get("stop_id") for s in metrics["stations"]
+                    ]:
+                        station_info = {
+                            "stop_id": stop_id,
+                            "coords": (
+                                segment.get("start_coords")
+                                if stop_id == segment.get("start_stop_id")
+                                else segment.get("end_coords")
+                            ),
+                        }
+                        metrics["stations"].append(station_info)
+
+        return metrics
+
+    def _collect_agent_journey_segments(self, agent) -> List[Dict[str, Any]]:
+        """
+        Collect detailed journey segment data for transit users.
+        FIXED: Proper type handling and validation
+        """
+        segments_data = []
+
+        journey_plan = getattr(agent, "journey_plan", [])
+        for i, segment in enumerate(journey_plan):
+            try:
+                # FIXED: Ensure proper type conversion for all fields
+                segment_data = {
+                    "agent_id": str(agent.unique_id),
+                    "segment_index": int(i),  # Explicit integer conversion
+                    "transport_mode": str(segment.get("mode", "UNKNOWN")),
+                    "departure_time": (
+                        str(segment.get("departure_time"))
+                        if segment.get("departure_time")
+                        else None
+                    ),
+                    "arrival_time": None,  # Will be calculated if needed
+                    "travel_time_minutes": self._safe_float_conversion(
+                        segment.get("duration", 0)
+                    )
+                    / 60.0,
+                    "wait_time_minutes": self._safe_float_conversion(
+                        segment.get("wait_duration", 0)
+                    )
+                    / 60.0,
+                    "distance_m": self._safe_float_conversion(
+                        segment.get("distance", 0)
+                    ),
+                    "start_stop_id": (
+                        str(segment.get("start_stop_id"))
+                        if segment.get("start_stop_id")
+                        else None
+                    ),
+                    "end_stop_id": (
+                        str(segment.get("end_stop_id"))
+                        if segment.get("end_stop_id")
+                        else None
+                    ),
+                    "route_id": (
+                        str(segment.get("route_id"))
+                        if segment.get("route_id")
+                        else None
+                    ),
+                    "agency_id": (
+                        str(segment.get("agency_id"))
+                        if segment.get("agency_id")
+                        else None
+                    ),
+                    "feed": str(segment.get("feed")) if segment.get("feed") else None,
+                    "geometry_wkt": self._extract_geometry_wkt(segment),
+                }
+
+                # Handle coordinate extraction with proper type safety
+                start_coords = segment.get("start_coords")
+                end_coords = segment.get("end_coords")
+
+                if start_coords and len(start_coords) >= 2:
+                    segment_data["start_lat"] = self._safe_float_conversion(
+                        start_coords[0]
+                    )
+                    segment_data["start_lon"] = self._safe_float_conversion(
+                        start_coords[1]
+                    )
+                else:
+                    segment_data["start_lat"] = None
+                    segment_data["start_lon"] = None
+
+                if end_coords and len(end_coords) >= 2:
+                    segment_data["end_lat"] = self._safe_float_conversion(end_coords[0])
+                    segment_data["end_lon"] = self._safe_float_conversion(end_coords[1])
+                else:
+                    segment_data["end_lat"] = None
+                    segment_data["end_lon"] = None
+
+                segments_data.append(segment_data)
+
+            except Exception as e:
+                print(f"Error collecting segment {i} for agent {agent.unique_id}: {e}")
+                print(f"Problematic segment data: {segment}")
+                # Continue processing other segments even if one fails
+                continue
+
+        return segments_data
+
+    def _safe_float_conversion(self, value) -> float:
+        """
+        Safely convert a value to float with fallback to 0.0
+        """
+        if value is None:
+            return 0.0
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return 0.0
+
+    def _extract_geometry_wkt(self, segment) -> Optional[str]:
+        """
+        Extract geometry as WKT string from segment
+        """
+        geometry = segment.get("geometry")
+        if geometry is None:
+            return None
+
+        try:
+            if hasattr(geometry, "wkt"):
+                return geometry.wkt
+            elif hasattr(geometry, "__str__"):
+                return str(geometry)
+            else:
+                return None
+        except Exception:
+            return None
 
     def _validate_agent_final_status(self, agent) -> None:
         """
@@ -2395,11 +2652,54 @@ class EvacuationModel(ap.Model):
                     f"Multi-modal agent {agent.unique_id}: Failed - {getattr(agent, 'fail_reason', 'Unknown reason')}"
                 )
 
-    def _generate_collection_summary(self) -> None:
-        """Generate and print summary statistics of collected agent data."""
+    def _write_agent_trace(self, agent, traces_dir: str, i: int):
+        """Write enhanced individual agent trace with evacuation area validation."""
+        if not (hasattr(agent, "path_history") and agent.path_history):
+            return
+
+        try:
+            # Add evacuation area validation to each trace entry
+            enriched_history = []
+            for entry in agent.path_history:
+                enriched_entry = entry.copy()
+
+                # Re-validate evacuation area status
+                if entry.get("y") and entry.get("x"):
+                    lat, lon = entry["y"], entry["x"]
+                    # Double-check evacuation area status
+                    in_evac_area = self.is_pos_in_evacuation_area(
+                        (lat, lon), if_lat_lon=True, debug_agent_id=agent.unique_id
+                    )
+                    enriched_entry["in_evacuation_area_validated"] = in_evac_area
+
+                    # Add distance from evacuation center for analysis
+                    evac_center = self.evac_polygon.centroid
+                    distance_from_center = haversine(
+                        (lat, lon), (evac_center.y, evac_center.x), unit="m"
+                    )
+                    enriched_entry["distance_from_evac_center_m"] = distance_from_center
+
+                enriched_history.append(enriched_entry)
+
+            # Write enhanced trace
+            trace_df = pl.DataFrame(enriched_history)
+            trace_file = f"{traces_dir}/{agent.unique_id}_{i}.csv"
+            trace_df.write_csv(trace_file)
+
+            print(
+                f"Enhanced trace written for agent {agent.unique_id} ({len(enriched_history)} entries)"
+            )
+
+        except Exception as e:
+            print(f"Error writing enhanced trace for agent {agent.unique_id}: {e}")
+
+    def _generate_enhanced_summary(self):
+        """Generate enhanced summary statistics with evacuation area validation."""
         if self.agent_paths_df.is_empty():
             print("No agent data collected")
             return
+
+        print("\n=== ENHANCED EVACUATION SIMULATION SUMMARY ===")
 
         # Status distribution
         status_counts = (
@@ -2411,56 +2711,70 @@ class EvacuationModel(ap.Model):
         for row in status_counts.iter_rows(named=True):
             print(f"  {row['status']}: {row['count']}")
 
-        # Transport mode distribution
-        mode_counts = (
-            self.agent_paths_df.group_by("final_mode")
+        # Evacuation area validation results
+        start_evac_counts = (
+            self.agent_paths_df.group_by("start_in_evacuation_area")
             .agg(pl.count())
             .sort("count", descending=True)
         )
-        print("\nTransport Mode Distribution:")
-        for row in mode_counts.iter_rows(named=True):
-            print(f"  {row['final_mode']}: {row['count']}")
-
-        # Public transport usage
-        pt_usage = self.agent_paths_df.group_by("used_public_transport").agg(pl.count())
-        print("\nPublic Transport Usage:")
-        for row in pt_usage.iter_rows(named=True):
-            status = "Used PT" if row["used_public_transport"] else "No PT"
+        print("\nStarting Position in Evacuation Area:")
+        for row in start_evac_counts.iter_rows(named=True):
+            status = "Inside" if row["start_in_evacuation_area"] else "Outside"
             print(f"  {status}: {row['count']}")
 
-        # Evacuation time statistics for successful evacuees
-        arrived_agents = self.agent_paths_df.filter(pl.col("status") == "ARRIVED")
-        if not arrived_agents.is_empty():
-            evac_stats = arrived_agents.select(pl.col("evacuation_time")).describe()
-            print(f"\nEvacuation Time Statistics (successful evacuees only):")
-            print(f"  Mean: {evac_stats['evacuation_time'][1]:.1f} seconds")
-            print(f"  Median: {evac_stats['evacuation_time'][5]:.1f} seconds")
-            print(f"  Max: {evac_stats['evacuation_time'][7]:.1f} seconds")
-
-        # Position validation summary
-        agents_with_coords = self.agent_paths_df.filter(
-            (pl.col("end_lat").is_not_null()) & (pl.col("end_lon").is_not_null())
+        end_evac_counts = (
+            self.agent_paths_df.group_by("end_in_evacuation_area")
+            .agg(pl.count())
+            .sort("count", descending=True)
         )
-        print(f"\nPosition Tracking:")
-        print(
-            f"  Agents with final coordinates: {len(agents_with_coords)}/{len(self.agent_paths_df)}"
-        )
+        print("\nFinal Position in Evacuation Area:")
+        for row in end_evac_counts.iter_rows(named=True):
+            status = "Inside" if row["end_in_evacuation_area"] else "Outside"
+            print(f"  {status}: {row['count']}")
 
-        # Check for agents marked as arrived but potentially in wrong location
-        arrived_with_coords = agents_with_coords.filter(pl.col("status") == "ARRIVED")
-        if not arrived_with_coords.is_empty():
+        # Check for problematic cases
+        problematic = self.agent_paths_df.filter(
+            (pl.col("status") == "ARRIVED") & (pl.col("end_in_evacuation_area") == True)
+        )
+        if not problematic.is_empty():
             print(
-                f"  Successfully arrived agents with coordinates: {len(arrived_with_coords)}"
+                f"\n⚠️  WARNING: {len(problematic)} agents marked as ARRIVED but still in evacuation area!"
             )
 
-            # Sample a few final positions for manual verification
-            sample_size = min(5, len(arrived_with_coords))
-            sample = arrived_with_coords.sample(n=sample_size)
-            print(f"  Sample final positions:")
-            for row in sample.iter_rows(named=True):
-                print(
-                    f"    Agent {row['agent_id']}: ({row['end_lat']:.6f}, {row['end_lon']:.6f})"
-                )
+        # Transit usage statistics
+        transit_users = self.agent_paths_df.filter(
+            pl.col("used_public_transport") == True
+        )
+        if not transit_users.is_empty():
+            print(f"\nPublic Transport Usage:")
+            print(f"  Transit users: {len(transit_users)}/{len(self.agent_paths_df)}")
+
+            avg_wait = transit_users.select(
+                pl.col("total_wait_time_minutes").mean()
+            ).item()
+            avg_transit = transit_users.select(
+                pl.col("total_transit_time_minutes").mean()
+            ).item()
+            avg_walk = transit_users.select(
+                pl.col("total_walking_time_minutes").mean()
+            ).item()
+
+            print(f"  Average wait time: {avg_wait:.1f} minutes")
+            print(f"  Average transit time: {avg_transit:.1f} minutes")
+            print(f"  Average walking time: {avg_walk:.1f} minutes")
+
+        # Save detailed outputs
+        self.agent_paths_df.write_csv("simulation_outcomes/Enhanced_Agent_Summary.csv")
+        if not self.journey_segments_df.is_empty():
+            self.journey_segments_df.write_csv(
+                "simulation_outcomes/Journey_Segments_Detail.csv"
+            )
+
+        print("\n✅ Enhanced data collection complete!")
+        print("Files saved:")
+        print("  - Enhanced_Agent_Summary.csv")
+        print("  - Journey_Segments_Detail.csv")
+        print("  - Individual enhanced traces in agents_traces/")
 
 
 def run_simulation(parameters: Dict[str, Any]) -> Tuple[EvacuationModel, Any]:
