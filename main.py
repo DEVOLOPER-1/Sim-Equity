@@ -69,7 +69,7 @@ def main():
     SCENARIO_CENTER_LAT = 48.858844
     SCENARIO_CENTER_LON = 2.347012
     SCENARIO_RADIUS_KM = 50.0
-    MAX_SIMULATION_STEPS = 60
+    MAX_SIMULATION_STEPS = 160
     DATA_DIR = "simulation/maps_data/osmnx_layers/"
 
     print(f"--- SIMULATION STARTING --- {datetime.now()}")
@@ -122,6 +122,9 @@ def main():
         "evacuation_area_polygon": evacuation_area_polygon,
         "agents_df": agents_df,
         "steps": MAX_SIMULATION_STEPS,  # 60 steps = 1 hour
+        "use_public_transport": True,
+        "osm_pbf_path": DATA_DIR + "ile-de-france-250902.osm.pbf",
+        "gtfs_zip_path": DATA_DIR + "IDFM-gtfs.zip",
     }
 
     # Access and analyze results

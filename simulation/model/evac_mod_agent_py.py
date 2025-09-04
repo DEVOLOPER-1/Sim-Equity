@@ -350,7 +350,7 @@ class EvacuationAgent(ap.Agent):
         # Choose routing strategy based on mode and availability
         success = False
 
-        if self.main_mode in ["BIKE", "WALKING"] and self.model.use_public_transport:
+        if self.main_mode != "CAR" and self.model.use_public_transport:
             # Try multi-modal routing for bike/walk + transit
             success = self._plan_multi_modal_route()
 
@@ -378,7 +378,7 @@ class EvacuationAgent(ap.Agent):
             Optional[int]: Target node ID or None if no valid destination
         """
         # Check if home is safe and reachable
-        if self.home_location:
+        if self.home_location and self.home_location != self.start_pos:
             is_home_safe = not self.model.is_pos_in_evacuation_area(
                 self.home_location, True
             )
@@ -401,7 +401,38 @@ class EvacuationAgent(ap.Agent):
             print(f"Agent {self.unique_id}: Heading to shelter")
             return shelter_node
 
+        # If no shelter found, try to find any safe location outside evacuation zone
+        safe_node = self._find_any_safe_node()
+        if safe_node:
+            print(f"Agent {self.unique_id}: Heading to safe location")
+            return safe_node
+
         self._fail_agent("Could not find any safe destination")
+        return None
+
+    def _find_any_safe_node(self) -> Optional[int]:
+        """
+        Find any safe node outside evacuation area as fallback.
+        """
+        graph = self._get_movement_graph()
+        if not graph:
+            return None
+
+        # Try to find a node in the general direction away from evacuation area
+        for node_id, data in graph.nodes(data=True):
+            if "x" in data and "y" in data:
+                node_lat, node_lon = data["y"], data["x"]
+                if not self.model.is_pos_in_evacuation_area((node_lat, node_lon), True):
+                    # Check if this node is reachable
+                    try:
+                        path = nx.shortest_path(
+                            graph, self.current_pos_node, node_id, weight="length"
+                        )
+                        if path:
+                            return node_id
+                    except nx.NetworkXNoPath:
+                        continue
+
         return None
 
     def _plan_multi_modal_route(self) -> bool:
@@ -579,36 +610,80 @@ class EvacuationAgent(ap.Agent):
     def _move_multi_modal(self) -> None:
         """
         Movement along R5py multi-modal journey.
-        Handles different transport mode segments.
+        FIXED: Proper time progression, destination tracking, and status updates
         """
         if self.current_journey_segment >= len(self.journey_plan):
+            # CRITICAL FIX: Update current_pos_node to target destination
+            if hasattr(self, "target_node") and self.target_node:
+                self.current_pos_node = self.target_node
+
             self.status = "ARRIVED"
             print(f"Agent {self.unique_id}: Completed multi-modal journey")
             self._add_position_to_history()
             return
 
         segment = self.journey_plan[self.current_journey_segment]
-        segment_duration = segment.get("duration", 0)
+        segment_mode = segment.get("mode", "").upper()
 
-        # Update time spent on current segment
+        # FIXED: Convert duration from minutes to seconds for consistency
+        segment_duration_minutes = segment.get("duration", 0)
+        segment_duration_seconds = segment_duration_minutes * 60  # Convert to seconds
+
+        print(
+            f"Agent {self.unique_id}: Segment {self.current_journey_segment + 1}/{len(self.journey_plan)} - {segment_mode} ({segment_duration_minutes:.1f} min)"
+        )
+
+        # Handle waiting for transit
+        if segment_mode in ["WAIT", "TRANSIT_WAIT"]:
+            self.time_on_current_edge_s += self.model.step_seconds
+
+            # Check if waiting is complete
+            if self.time_on_current_edge_s >= segment_duration_seconds:
+                self.current_journey_segment += 1
+                self.time_on_current_edge_s = 0.0
+                print(
+                    f"Agent {self.unique_id}: Finished waiting ({segment_duration_minutes:.1f} min)"
+                )
+
+            self._add_position_to_history()
+            return
+
+        # Handle moving segments (walking, transit, etc.)
         self.time_on_current_edge_s += self.model.step_seconds
 
-        # Check if segment is complete
-        if self.time_on_current_edge_s >= segment_duration:
+        # Calculate progress for this segment
+        progress = (
+            self.time_on_current_edge_s / segment_duration_seconds
+            if segment_duration_seconds > 0
+            else 1.0
+        )
+
+        # FIXED: Proper segment completion check
+        if self.time_on_current_edge_s >= segment_duration_seconds:
             self.current_journey_segment += 1
             self.time_on_current_edge_s = 0.0
 
+            print(
+                f"Agent {self.unique_id}: Completed segment {segment_mode} ({segment_duration_minutes:.1f} min)"
+            )
+
             if self.current_journey_segment >= len(self.journey_plan):
+                # CRITICAL FIX: Update position to destination before marking as arrived
+                if hasattr(self, "target_node") and self.target_node:
+                    self.current_pos_node = self.target_node
+
                 self.status = "ARRIVED"
-                print(f"Agent {self.unique_id}: Journey complete")
+                print(f"Agent {self.unique_id}: Multi-modal journey complete - ARRIVED")
             else:
                 # Move to next segment
                 next_segment = self.journey_plan[self.current_journey_segment]
+                next_mode = next_segment.get("mode", "UNKNOWN")
+                next_duration = next_segment.get("duration", 0)
                 print(
-                    f"Agent {self.unique_id}: Starting segment {self.current_journey_segment + 1}: {next_segment.get('mode', 'UNKNOWN')}"
+                    f"Agent {self.unique_id}: Starting segment {self.current_journey_segment + 1}: {next_mode} ({next_duration:.1f} min)"
                 )
 
-        # Update position for tracking
+        # FIXED: Always update position for tracking, especially near journey end
         self._add_position_to_history()
 
     def _get_movement_graph(self) -> Optional[nx.Graph]:
@@ -693,9 +768,7 @@ class EvacuationAgent(ap.Agent):
     def _get_current_coordinates(self) -> Tuple[Optional[float], Optional[float]]:
         """
         Get current coordinates based on movement mode and position.
-
-        Returns:
-            Tuple[Optional[float], Optional[float]]: (x, y) coordinates or (None, None)
+        FIXED: Proper interpolation and destination tracking for multi-modal journeys
         """
         # Multi-modal movement coordinate interpolation
         if (
@@ -704,8 +777,13 @@ class EvacuationAgent(ap.Agent):
             and self.journey_plan
             and self.current_journey_segment < len(self.journey_plan)
         ):
-
             segment = self.journey_plan[self.current_journey_segment]
+
+            # CRITICAL FIX: Check if this is the final segment
+            is_final_segment = (
+                self.current_journey_segment == len(self.journey_plan) - 1
+            )
+
             progress = (
                 self.time_on_current_edge_s / segment.get("duration", 1)
                 if segment.get("duration", 0) > 0
@@ -716,17 +794,37 @@ class EvacuationAgent(ap.Agent):
             # Try to interpolate along geometry if available
             if "geometry" in segment and segment["geometry"] is not None:
                 try:
+                    if (
+                        is_final_segment and progress >= 0.95
+                    ):  # Near end of final segment
+                        # Return the destination coordinates instead of interpolated position
+                        geom = segment["geometry"]
+                        if hasattr(geom, "coords"):
+                            # Get the last coordinate (destination)
+                            coords = list(geom.coords)
+                            if coords:
+                                return coords[-1][1], coords[-1][0]  # (lat, lon)
+
                     point = segment["geometry"].interpolate(progress, normalized=True)
-                    return point.x, point.y
+                    return point.y, point.x  # Return (lat, lon) not (x, y)
                 except Exception:
                     pass
+
+            # FALLBACK: If no geometry, try to get destination coordinates for final segment
+            if is_final_segment and hasattr(self, "target_node") and self.target_node:
+                dest_coords = self.model.get_node_coordinates(
+                    self.target_node, "WALKING"
+                )
+                if dest_coords:
+                    return dest_coords  # Already in (lat, lon) format
 
         # Standard node-based positioning
         if self.current_pos_node is not None:
             graph = self._get_movement_graph()
             if graph and self.current_pos_node in graph.nodes:
                 node_data = graph.nodes[self.current_pos_node]
-                return node_data.get("x"), node_data.get("y")
+                # OSMnx: x=lon, y=lat -> return as (lat, lon)
+                return node_data.get("y"), node_data.get("x")
 
         return None, None
 
@@ -792,14 +890,35 @@ class EvacuationModel(ap.Model):
         self.start_datetime: datetime = self.p.start_datetime
         self.sim_time: datetime = self.p.start_datetime.replace(year=2025, month=9)
         self.step_seconds = self.p.step_seconds
-
+        base_step_seconds = self.p.step_seconds
         # SVI-based behavioral parameters
         self.svi_speed_penalty = self.p.get("svi_speed_penalty", 0.3)
         self.max_svi_start_delay_s = self.p.get("max_svi_start_delay_s", 1800)  # 30 min
         self.base_patience_s = self.p.get("base_patience_s", 300)  # 5 min
 
         # Public transport settings
-        self.use_public_transport = self.p.get("use_public_transport", True)
+        self.use_public_transport = self.p.get("use_public_transport", False)
+
+        if self.use_public_transport:
+            # Minimum step size to handle 1-minute transit segments
+            min_step_for_transit = 60  # 1 minute in seconds
+            if base_step_seconds > min_step_for_transit:
+                print(
+                    f"WARNING: Step size ({base_step_seconds}s) may be too large for transit simulation"
+                )
+                print(f"Consider reducing to {min_step_for_transit}s or smaller")
+
+            # Recommended: 30-60 seconds for good transit simulation granularity
+            recommended_step = min(base_step_seconds, 60)
+            if recommended_step != base_step_seconds:
+                print(
+                    f"Adjusting step size from {base_step_seconds}s to {recommended_step}s for transit compatibility"
+                )
+                self.step_seconds = recommended_step
+            else:
+                self.step_seconds = base_step_seconds
+        else:
+            self.step_seconds = base_step_seconds
 
     def _initialize_data_structures(self) -> None:
         """Initialize data collection structures."""
@@ -1379,6 +1498,14 @@ class EvacuationModel(ap.Model):
                         except Exception:
                             geom = None
 
+                    # Convert duration to seconds if it's a timedelta
+                    duration_seconds = 0.0
+                    if duration is not None:
+                        if hasattr(duration, "total_seconds"):
+                            duration_seconds = float(duration.total_seconds())
+                        else:
+                            duration_seconds = float(duration)
+
                     segments.append(
                         {
                             "mode": (
@@ -1386,9 +1513,7 @@ class EvacuationModel(ap.Model):
                                 if seg_mode is not None
                                 else "WALK"
                             ),
-                            "duration": (
-                                float(duration) if duration is not None else 0.0
-                            ),
+                            "duration": duration_seconds,  # Always in seconds
                             "distance": (
                                 float(distance) if distance is not None else 0.0
                             ),
@@ -1398,7 +1523,8 @@ class EvacuationModel(ap.Model):
                         }
                     )
 
-                # return segments as-is (order assumed to be correct)
+                # Process segments for validation and fixes
+                segments = self._validate_and_fix_segments(segments)
                 return segments
 
             # CASE B: each row is a segment. Filter rows by chosen_option if available.
@@ -1489,14 +1615,18 @@ class EvacuationModel(ap.Model):
                         except Exception:
                             geom = None
 
+                    # Convert duration to seconds
+                    duration_seconds = 0.0
+                    if duration is not None:
+                        if hasattr(duration, "total_seconds"):
+                            duration_seconds = float(duration.total_seconds())
+                        else:
+                            duration_seconds = float(duration)
+
                     segments.append(
                         {
                             "mode": str(mode).upper() if mode is not None else "WALK",
-                            "duration": (
-                                float(duration.total_seconds() / 60)
-                                if duration is not None
-                                else 0.0  # duration in mins
-                            ),
+                            "duration": duration_seconds,  # Always in seconds
                             "distance": (
                                 float(distance) if distance is not None else 0.0
                             ),
@@ -1510,12 +1640,114 @@ class EvacuationModel(ap.Model):
                     traceback.print_exc()
                     continue
 
+            # Process segments for validation and fixes
+            segments = self._validate_and_fix_segments(segments)
+
+            # After processing segments, identify waiting periods
+            for i, segment in enumerate(segments):
+                if segment.get("mode") == "TRANSIT" and i > 0:
+                    # Check if there's a waiting period before this transit segment
+                    prev_segment = segments[i - 1]
+                    if prev_segment.get("mode") == "WALK" and "end_stop_id" in segment:
+                        # This walk segment likely represents waiting at a stop
+                        prev_segment["mode"] = "WAIT"
+                        prev_segment["waiting_for"] = segment.get("route_id", "TRANSIT")
+
             return segments
 
         except Exception as e:
             print(f"Error processing R5py journey: {e}")
             traceback.print_exc()
             return []
+
+    def _validate_and_fix_segments(
+        self, segments: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Validate and fix journey segments for realistic simulation.
+
+        Args:
+            segments: List of journey segments
+
+        Returns:
+            List of validated and fixed segments
+        """
+        fixed_segments = []
+
+        for i, segment in enumerate(segments):
+            # CRITICAL FIX: Ensure durations are realistic and in seconds
+            duration = segment.get("duration", 0)
+            mode = segment.get("mode", "WALK").upper()
+            distance = segment.get("distance", 0)
+
+            if duration <= 0:
+                # Set minimum realistic durations based on mode and distance
+                if mode in ["WALK", "WALKING"]:
+                    # Walking: ~5 km/h = 1.4 m/s
+                    if distance > 0:
+                        duration = max(distance / 1.4, 30)  # Min 30 seconds
+                    else:
+                        duration = 120  # Default 2 minutes
+                elif mode in ["TRANSIT", "BUS", "TRAIN", "METRO", "SUBWAY"]:
+                    # Transit: estimate based on distance or set minimum
+                    if distance > 0:
+                        duration = max(
+                            distance / 10, 300
+                        )  # Min 5 minutes for transit (~36 km/h average)
+                    else:
+                        duration = 600  # Default 10 minutes
+                elif mode in ["WAIT", "TRANSIT_WAIT"]:
+                    duration = 300  # Default 5 minutes waiting
+                elif mode == "BIKE":
+                    # Cycling: ~15 km/h = 4.2 m/s
+                    if distance > 0:
+                        duration = max(distance / 4.2, 60)  # Min 1 minute
+                    else:
+                        duration = 300  # Default 5 minutes
+                else:
+                    duration = 120  # Default 2 minutes for unknown modes
+
+                segment["duration"] = duration
+                print(
+                    f"Fixed duration for segment {i+1} ({mode}): {duration:.0f} seconds"
+                )
+
+            # Ensure minimum duration for very short segments
+            if duration < 10:
+                segment["duration"] = 10  # Minimum 10 seconds
+                print(
+                    f"Increased minimum duration for segment {i+1} ({mode}): 10 seconds"
+                )
+
+            # FIXED: Ensure geometry endpoints align with journey start/end
+            if i == len(segments) - 1:  # Final segment
+                # Verify final segment leads to destination
+                geometry = segment.get("geometry")
+                if geometry and hasattr(geometry, "coords"):
+                    coords = list(geometry.coords)
+                    if coords:
+                        final_point = coords[-1]  # (lon, lat)
+                        segment["final_destination"] = (
+                            final_point[1],
+                            final_point[0],
+                        )  # (lat, lon)
+                        print(
+                            f"Final segment destination: {segment['final_destination']}"
+                        )
+
+            # Add segment validation info
+            segment["segment_index"] = i
+            segment["is_final_segment"] = i == len(segments) - 1
+
+            fixed_segments.append(segment)
+
+        # Calculate total journey time
+        total_duration = sum(seg.get("duration", 0) for seg in fixed_segments)
+        print(
+            f"Total journey duration: {total_duration:.0f} seconds ({total_duration/60:.1f} minutes)"
+        )
+
+        return fixed_segments
 
     # --- HELPER METHODS (API FOR AGENTS) ---
 
@@ -1907,13 +2139,17 @@ class EvacuationModel(ap.Model):
         return mode_mapping.get(mode, "WALKING")  # Default to walking
 
     def collect_agent_paths_data(self) -> pl.DataFrame:
-        """Collect path history data from all agents into the Polars DataFrame."""
-        print("📊 Collecting agent path history data...")
+        """
+        Collect path history data from all agents into the Polars DataFrame.
+        FIXED: Proper status validation, position tracking, and evacuation area verification.
+        """
+        print("Collecting agent path history data...")
 
         # Create lists for each column
         agent_ids = []
         svi_values = []
-        main_modes = []
+        original_modes = []
+        final_modes = []
         statuses = []
         evac_times = []
         start_lats = []
@@ -1924,6 +2160,7 @@ class EvacuationModel(ap.Model):
         started_ats = []
         arrived_ats = []
         used_public_transports = []
+        segments_completed = []
 
         # Ensure the traces directory exists
         traces_dir = "simulation_outcomes/agents_traces"
@@ -1941,33 +2178,55 @@ class EvacuationModel(ap.Model):
 
         # Collect data from all agents
         for agent in self.agents:
-            # Get start and end positions from path history if available
+            # Initialize variables for this agent
             start_lat, start_lon, end_lat, end_lon = None, None, None, None
             started_at, arrived_at = None, None
             used_public_transport = getattr(agent, "using_public_transport", False)
+            original_mode = getattr(
+                agent, "original_mode", getattr(agent, "main_mode", "UNKNOWN")
+            )
+            final_mode = getattr(agent, "main_mode", "UNKNOWN")
+            segments_completed_count = 0
 
+            # CRITICAL FIX: Validate agent status before data collection
+            self._validate_agent_final_status(agent)
+
+            # Process path history if available
             if hasattr(agent, "path_history") and agent.path_history:
                 print(
                     f"Agent {agent.id}: Has {len(agent.path_history)} path history entries"
                 )
 
-                # Write trace CSV for this agent
+                # Write individual trace CSV for this agent
                 if len(agent.path_history) >= 1:
                     try:
-                        his_df = pl.DataFrame(agent.path_history)
+                        # Add additional debugging info to trace
+                        enriched_history = []
+                        for entry in agent.path_history:
+                            enriched_entry = entry.copy()
+                            # Add evacuation area status for each position
+                            if entry.get("y") and entry.get("x"):
+                                pos = (entry["y"], entry["x"])  # (lat, lon)
+                                enriched_entry["in_evacuation_area"] = (
+                                    self.is_pos_in_evacuation_area(pos, if_lat_lon=True)
+                                )
+                            else:
+                                enriched_entry["in_evacuation_area"] = None
+                            enriched_history.append(enriched_entry)
+
+                        his_df = pl.DataFrame(enriched_history)
                         trace_file = f"{traces_dir}/{agent.unique_id}.csv"
                         his_df.write_csv(trace_file)
                         print(
-                            f"✅ Written trace for agent {agent.unique_id} ({len(agent.path_history)} entries)"
+                            f"Written trace for agent {agent.unique_id} ({len(agent.path_history)} entries)"
                         )
                     except Exception as e:
-                        print(
-                            f"❌ Error writing trace for agent {agent.unique_id}: {e}"
-                        )
+                        print(f"Error writing trace for agent {agent.unique_id}: {e}")
                         import traceback
 
                         traceback.print_exc()
 
+                # Extract start position (first entry)
                 if len(agent.path_history) > 0:
                     first_entry = agent.path_history[0]
                     start_lat = first_entry.get("y")
@@ -1976,6 +2235,7 @@ class EvacuationModel(ap.Model):
                     if isinstance(started_at, datetime):
                         started_at = started_at.isoformat()
 
+                # Extract end position (last entry)
                 if len(agent.path_history) > 0:
                     last_entry = agent.path_history[-1]
                     end_lat = last_entry.get("y")
@@ -1983,13 +2243,54 @@ class EvacuationModel(ap.Model):
                     arrived_at = last_entry.get("time")
                     if isinstance(arrived_at, datetime):
                         arrived_at = arrived_at.isoformat()
+
+                    # CRITICAL FIX: Verify the end position makes sense
+                    if end_lat and end_lon:
+                        end_pos = (end_lat, end_lon)
+                        is_end_in_evac_area = self.is_pos_in_evacuation_area(
+                            end_pos, if_lat_lon=True
+                        )
+
+                        # Log position validation
+                        print(
+                            f"Agent {agent.unique_id}: Final position ({end_lat:.6f}, {end_lon:.6f}), "
+                            f"In evacuation area: {is_end_in_evac_area}, Status: {agent.status}"
+                        )
+
+                        # Check for suspicious "ARRIVED" agents still in evacuation area
+                        if agent.status == "ARRIVED" and is_end_in_evac_area:
+                            print(
+                                f"WARNING: Agent {agent.unique_id} marked as ARRIVED but final position is in evacuation area!"
+                            )
+                            # Re-validate this agent's status
+                            agent.status = "FAILED"
+                            agent.fail_reason = "Final position verification failed - still in evacuation area"
+
             else:
                 print(f"Agent {agent.id}: No path history available")
+                # For agents with no path history, try to get their current position
+                if hasattr(agent, "current_pos_node") and agent.current_pos_node:
+                    coords = self.get_node_coordinates(
+                        agent.current_pos_node, agent.main_mode
+                    )
+                    if coords:
+                        start_lat, start_lon = coords
+                        end_lat, end_lon = coords  # Same position if no movement
+
+            # Calculate segments completed for multi-modal agents
+            if used_public_transport and hasattr(agent, "current_journey_segment"):
+                segments_completed_count = getattr(agent, "current_journey_segment", 0)
+                total_segments = len(getattr(agent, "journey_plan", []))
+                if total_segments > 0:
+                    segments_completed_count = min(
+                        segments_completed_count, total_segments
+                    )
 
             # Append data to lists
             agent_ids.append(agent.unique_id)
             svi_values.append(getattr(agent, "svi", None))
-            main_modes.append(getattr(agent, "main_mode", None))
+            original_modes.append(original_mode)
+            final_modes.append(final_mode)
             statuses.append(getattr(agent, "status", None))
             evac_times.append(getattr(agent, "evacuation_time", 0))
             start_lats.append(start_lat)
@@ -2000,13 +2301,15 @@ class EvacuationModel(ap.Model):
             started_ats.append(started_at)
             arrived_ats.append(arrived_at)
             used_public_transports.append(used_public_transport)
+            segments_completed.append(segments_completed_count)
 
         # Create DataFrame from collected data
         self.agent_paths_df = pl.DataFrame(
             data={
                 "agent_id": agent_ids,
                 "svi": svi_values,
-                "main_mode": main_modes,
+                "original_mode": original_modes,
+                "final_mode": final_modes,
                 "status": statuses,
                 "evacuation_time": evac_times,
                 "start_lat": start_lats,
@@ -2017,11 +2320,147 @@ class EvacuationModel(ap.Model):
                 "started_at": started_ats,
                 "arrived_at": arrived_ats,
                 "used_public_transport": used_public_transports,
+                "segments_completed": segments_completed,
             }
         )
 
-        print(f"✅ Collected path data for {len(agent_ids)} agents")
+        # Generate summary statistics
+        self._generate_collection_summary()
+
+        print(f"Collected path data for {len(agent_ids)} agents")
         return self.agent_paths_df
+
+    def _validate_agent_final_status(self, agent) -> None:
+        """
+        Validate and correct agent final status based on actual position.
+
+        Args:
+            agent: Agent to validate
+        """
+        if agent.status == "ARRIVED":
+            # Get agent's current coordinates
+            final_coords = None
+
+            # Try to get from path history first
+            if hasattr(agent, "path_history") and agent.path_history:
+                last_entry = agent.path_history[-1]
+                if last_entry.get("y") and last_entry.get("x"):
+                    final_coords = (last_entry["y"], last_entry["x"])  # (lat, lon)
+
+            # Fallback to current node position
+            if (
+                not final_coords
+                and hasattr(agent, "current_pos_node")
+                and agent.current_pos_node
+            ):
+                final_coords = self.get_node_coordinates(
+                    agent.current_pos_node, agent.main_mode
+                )
+
+            # Validate final position
+            if final_coords:
+                lat, lon = final_coords
+                if self.is_pos_in_evacuation_area((lat, lon), if_lat_lon=True):
+                    print(
+                        f"CRITICAL: Agent {agent.unique_id} marked as ARRIVED but final position "
+                        f"({lat:.6f}, {lon:.6f}) is still in evacuation area!"
+                    )
+                    agent.status = "FAILED"
+                    agent.fail_reason = (
+                        "Position validation failed - still in evacuation area"
+                    )
+                else:
+                    print(
+                        f"Validated: Agent {agent.unique_id} successfully evacuated to ({lat:.6f}, {lon:.6f})"
+                    )
+            else:
+                print(
+                    f"WARNING: Cannot validate final position for agent {agent.unique_id} - no coordinates available"
+                )
+
+        # Additional validation for multi-modal agents
+        if getattr(agent, "using_public_transport", False):
+            if agent.status == "ARRIVED":
+                print(
+                    f"Multi-modal agent {agent.unique_id}: Journey completed successfully"
+                )
+            elif agent.status == "EVACUATING":
+                current_segment = getattr(agent, "current_journey_segment", 0)
+                total_segments = len(getattr(agent, "journey_plan", []))
+                print(
+                    f"Multi-modal agent {agent.unique_id}: Still evacuating - segment {current_segment}/{total_segments}"
+                )
+            elif agent.status == "FAILED":
+                print(
+                    f"Multi-modal agent {agent.unique_id}: Failed - {getattr(agent, 'fail_reason', 'Unknown reason')}"
+                )
+
+    def _generate_collection_summary(self) -> None:
+        """Generate and print summary statistics of collected agent data."""
+        if self.agent_paths_df.is_empty():
+            print("No agent data collected")
+            return
+
+        # Status distribution
+        status_counts = (
+            self.agent_paths_df.group_by("status")
+            .agg(pl.count())
+            .sort("count", descending=True)
+        )
+        print("\nAgent Status Distribution:")
+        for row in status_counts.iter_rows(named=True):
+            print(f"  {row['status']}: {row['count']}")
+
+        # Transport mode distribution
+        mode_counts = (
+            self.agent_paths_df.group_by("final_mode")
+            .agg(pl.count())
+            .sort("count", descending=True)
+        )
+        print("\nTransport Mode Distribution:")
+        for row in mode_counts.iter_rows(named=True):
+            print(f"  {row['final_mode']}: {row['count']}")
+
+        # Public transport usage
+        pt_usage = self.agent_paths_df.group_by("used_public_transport").agg(pl.count())
+        print("\nPublic Transport Usage:")
+        for row in pt_usage.iter_rows(named=True):
+            status = "Used PT" if row["used_public_transport"] else "No PT"
+            print(f"  {status}: {row['count']}")
+
+        # Evacuation time statistics for successful evacuees
+        arrived_agents = self.agent_paths_df.filter(pl.col("status") == "ARRIVED")
+        if not arrived_agents.is_empty():
+            evac_stats = arrived_agents.select(pl.col("evacuation_time")).describe()
+            print(f"\nEvacuation Time Statistics (successful evacuees only):")
+            print(f"  Mean: {evac_stats['evacuation_time'][1]:.1f} seconds")
+            print(f"  Median: {evac_stats['evacuation_time'][5]:.1f} seconds")
+            print(f"  Max: {evac_stats['evacuation_time'][7]:.1f} seconds")
+
+        # Position validation summary
+        agents_with_coords = self.agent_paths_df.filter(
+            (pl.col("end_lat").is_not_null()) & (pl.col("end_lon").is_not_null())
+        )
+        print(f"\nPosition Tracking:")
+        print(
+            f"  Agents with final coordinates: {len(agents_with_coords)}/{len(self.agent_paths_df)}"
+        )
+
+        # Check for agents marked as arrived but potentially in wrong location
+        arrived_with_coords = agents_with_coords.filter(pl.col("status") == "ARRIVED")
+        if not arrived_with_coords.is_empty():
+            print(
+                f"  Successfully arrived agents with coordinates: {len(arrived_with_coords)}"
+            )
+
+            # Sample a few final positions for manual verification
+            sample_size = min(5, len(arrived_with_coords))
+            sample = arrived_with_coords.sample(n=sample_size)
+            print(f"  Sample final positions:")
+            for row in sample.iter_rows(named=True):
+                print(
+                    f"    Agent {row['agent_id']}: ({row['end_lat']:.6f}, {row['end_lon']:.6f})"
+                )
 
 
 def run_simulation(parameters: Dict[str, Any]) -> Tuple[EvacuationModel, Any]:
