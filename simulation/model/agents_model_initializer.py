@@ -2,7 +2,6 @@ import datetime
 import gc
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
-
 import numpy as np
 import polars as pl
 import shapely
@@ -671,9 +670,27 @@ class AgentsGatherer:
 
             if df.is_empty():
                 return None
-
-            c_lat = df.select("LATITUDE").mean().item()
-            c_lon = df.select("LONGITUDE").mean().item()
+            # Convert to Cartesian coordinates for proper centroid calculation
+            lats = df.select("LATITUDE").to_series().to_numpy()
+            lons = df.select("LONGITUDE").to_series().to_numpy()
+            
+            # Convert to radians
+            lat_rad = np.radians(lats)
+            lon_rad = np.radians(lons)
+            
+            # Convert to Cartesian coordinates
+            x = np.cos(lat_rad) * np.cos(lon_rad)
+            y = np.cos(lat_rad) * np.sin(lon_rad)
+            z = np.sin(lat_rad)
+            
+            # Calculate mean Cartesian coordinates
+            mean_x = np.mean(x)
+            mean_y = np.mean(y)
+            mean_z = np.mean(z)
+            
+            # Convert back to lat/lon
+            c_lon = np.degrees(np.arctan2(mean_y, mean_x))
+            c_lat = np.degrees(np.arctan2(mean_z, np.sqrt(mean_x**2 + mean_y**2)))
 
             if c_lat is None or c_lon is None:
                 return None
