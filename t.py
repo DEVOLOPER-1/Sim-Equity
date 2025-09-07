@@ -1,5 +1,5 @@
 """
-Enhanced academic visualization with 3 SVI quartiles and improved styling
+Enhanced academic visualization with SVI-based coloring using coolwarm palette
 """
 
 import math
@@ -8,29 +8,24 @@ from collections import defaultdict
 
 import folium
 import geojson
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 import numpy as np
 import polars as pl
 from playwright.sync_api import sync_playwright
 from shapely.geometry import mapping
 from sklearn.cluster import DBSCAN
 
-# Vulnerability color scheme with 3 quartiles
-VULNERABILITY_COLORS = {
-    "low": "#27AE60",  # Green
-    "moderate": "#F39C12",  # Orange
-    "high": "#E74C3C",  # Red
-}
-
 # Mode-specific styling
 MODE_STYLES = {
-    "VEHICLE": {"color": "#3498DB", "weight": 3, "opacity": 0.7, "dashArray": None},
-    "BIKE": {"color": "#9B59B6", "weight": 2, "opacity": 0.7, "dashArray": None},
-    "WALKING": {"color": "#2ECC71", "weight": 2, "opacity": 0.7, "dashArray": None},
+    "VEHICLE": {"weight": 3, "opacity": 0.7, "dashArray": None, "color": "#2E86AB"},
+    "BIKE": {"weight": 2, "opacity": 0.7, "dashArray": None, "color": "#43AA8B"},
+    "WALKING": {"weight": 2, "opacity": 0.7, "dashArray": None, "color": "#B95F89"},
     "PUBLIC_TRANSPORT": {
-        "color": "#E74C3C",
         "weight": 2,
         "opacity": 0.7,
         "dashArray": "5, 10",
+        "color": "#F39C12",
     },
 }
 
@@ -48,7 +43,7 @@ def load_agent_traces_with_svi():
     try:
         stats_df = pl.read_csv("simulation_outcomes/Agents_Statistics_Trial.csv")
         svi_mapping = {
-            row["agent_id"]: row.get("svi_normalized", 0.5)
+            row["agent_id"]: row.get("svi", 0.5)
             for row in stats_df.iter_rows(named=True)
         }
         print(f"Loaded SVI for {len(svi_mapping)} agents")
@@ -72,9 +67,10 @@ def load_agent_traces_with_svi():
 
             # Extract agent ID from filename
             agent_id = ag.replace(".csv", "").replace("agent_", "")
+            svi_agent_id = "_".join(ag.replace(".csv", "").split("_")[:-1])
 
             # Get SVI for this agent
-            svi = svi_mapping.get(agent_id, 0.5)
+            svi = svi_mapping.get(svi_agent_id, 0.5)
 
             # Determine coordinate columns (similar to previous approach)
             if "x" not in df.columns or "y" not in df.columns:
@@ -144,14 +140,18 @@ def load_agent_traces_with_svi():
     return agent_traces
 
 
-def categorize_svi(svi_value):
-    """Categorize SVI value into 3 equal quartiles (0-0.33, 0.33-0.66, 0.66-1)"""
-    if svi_value <= 0.33:
-        return "low"
-    elif svi_value <= 0.66:
-        return "moderate"
-    else:
-        return "high"
+def get_svi_colormap(agent_traces):
+    """Create a colormap based on the min and max SVI values across all agents"""
+    svi_values = [data["svi"] for data in agent_traces.values()]
+    min_svi = min(svi_values) + 0.2
+    max_svi = max(svi_values)
+
+    # Create a coolwarm colormap normalized to the SVI range
+    norm = mcolors.Normalize(vmin=min_svi, vmax=max_svi)
+    colormap = cm.ScalarMappable(norm=norm, cmap=cm.coolwarm)
+
+    print(f"SVI range: {min_svi:.3f} to {max_svi:.3f}")
+    return colormap, min_svi, max_svi
 
 
 def detect_bottlenecks(agent_traces, mode=None, epsilon=0.01, min_samples=3):
@@ -260,6 +260,9 @@ def categorize_bottlenecks(bottlenecks):
 def create_mode_specific_map(
     agent_traces,
     mode,
+    colormap,
+    min_svi,
+    max_svi,
     evacuation_area=None,
     geojson_path=None,
     output_html=None,
@@ -272,6 +275,9 @@ def create_mode_specific_map(
     Args:
         agent_traces: Dictionary of agent traces
         mode: Transportation mode to visualize
+        colormap: Matplotlib colormap for SVI values
+        min_svi: Minimum SVI value across all agents
+        max_svi: Maximum SVI value across all agents
         evacuation_area: Shapely polygon of evacuation area
         geojson_path: Path to region GeoJSON file
         output_html: Output HTML filename
@@ -351,9 +357,9 @@ def create_mode_specific_map(
         public_transport = data["public_transport"]
         svi = data["svi"]
 
-        # Get vulnerability category and color
-        svi_category = categorize_svi(svi)
-        color = VULNERABILITY_COLORS[svi_category]
+        # Get color based on SVI value
+        rgba_color = colormap.to_rgba(svi)
+        color = mcolors.to_hex(rgba_color)
 
         # Split path into segments based on mode and public transport
         segments = []
@@ -396,13 +402,13 @@ def create_mode_specific_map(
             if len(segment) < 2:
                 continue
 
-            # Add vulnerability color to style
+            # Add SVI-based color to style
             style["color"] = color
 
             folium.PolyLine(
                 segment,
                 **style,
-                tooltip=f"Agent {agent_id} (SVI: {svi_category})",
+                tooltip=f"Agent {agent_id} (SVI: {svi:.3f})",
             ).add_to(map_)
 
         # Add end marker only (small and subtle)
@@ -414,7 +420,7 @@ def create_mode_specific_map(
                 fill=True,
                 fillColor=color,
                 fill_opacity=0.7,
-                tooltip=f"Agent {agent_id} endpoint",
+                tooltip=f"Agent {agent_id} endpoint (SVI: {svi:.3f})",
             ).add_to(map_)
 
         agents_added += 1
@@ -480,8 +486,14 @@ def create_mode_specific_map(
 
     print(f"Added {len(added_bottlenecks)} bottleneck markers")
 
-    # Add legend
-    legend_html = f"""
+    # Create colorbar for SVI
+    svi_low_color = mcolors.to_hex(colormap.to_rgba(min_svi))
+    svi_mid_color = mcolors.to_hex(colormap.to_rgba((min_svi + max_svi) / 2))
+    svi_high_color = mcolors.to_hex(colormap.to_rgba(max_svi))
+    mode_color = MODE_STYLES.get(mode, {}).get("color", "#000000")
+    pt_color = MODE_STYLES["PUBLIC_TRANSPORT"]["color"]
+
+    colorbar_html = f"""
     <div style="position: fixed; 
                 bottom: 50px; right: 50px; 
                 background-color: white; 
@@ -493,17 +505,28 @@ def create_mode_specific_map(
                 font-family: Arial;
                 font-size: 12px;">
         <h4 style="margin-top: 0; margin-bottom: 10px;">Legend</h4>
-        <p style="margin: 2px 0;"><span style="color: {VULNERABILITY_COLORS['low']};">■</span> Low Vulnerability (SVI ≤ 0.33)</p>
-        <p style="margin: 2px 0;"><span style="color: {VULNERABILITY_COLORS['moderate']};">■</span> Moderate Vulnerability (0.33 < SVI ≤ 0.66)</p>
-        <p style="margin: 2px 0;"><span style="color: {VULNERABILITY_COLORS['high']};">■</span> High Vulnerability (SVI > 0.66)</p>
-        <p style="margin: 2px 0;"><span style="color: {MODE_STYLES['PUBLIC_TRANSPORT']['color']}; text-decoration: line-through;">---</span> Public Transport Segment</p>
+        <p style="margin: 2px 0;"><strong>SVI Score</strong></p>
+        <div style="width: 100%; height: 20px; background: linear-gradient(to right, 
+            {svi_low_color}, 
+            {svi_mid_color}, 
+            {svi_high_color}); 
+            margin-bottom: 5px;"></div>
+        <div style="display: flex; justify-content: space-between;">
+            <span>{min_svi:.2f}</span>
+            <span>{(min_svi + max_svi)/2:.2f}</span>
+            <span>{max_svi:.2f}</span>
+        </div>
+        <p style="margin: 10px 0 5px 0;"><strong>Line Style:</strong></p>
+        <p style="margin: 2px 0;"><span style="border-top: 2px solid {mode_color}; display: inline-block; width: 20px;"></span> {mode.title() if mode != 'VEHICLE' else 'Vehicle'}</p>
+        <p style="margin: 2px 0;"><span style="border-top: 2px dashed {pt_color}; display: inline-block; width: 20px;"></span> Public Transport</p>
         <p style="margin: 10px 0 5px 0;"><strong>Bottlenecks:</strong></p>
         <p style="margin: 2px 0;"><span style="color: #27AE60;">●</span> Low congestion</p>
         <p style="margin: 2px 0;"><span style="color: #F39C12;">●</span> Medium congestion</p>
         <p style="margin: 2px 0;"><span style="color: #E74C3C;">●</span> High congestion</p>
     </div>
     """
-    map_.get_root().html.add_child(folium.Element(legend_html))
+
+    map_.get_root().html.add_child(folium.Element(colorbar_html))
 
     # Add title
     mode_display_name = "Vehicle" if mode == "VEHICLE" else mode.title()
@@ -541,7 +564,7 @@ def create_mode_specific_map(
     return map_
 
 
-def save_map_as_png(html_file, png_file, width=1200, height=900, wait_time=5):
+def save_map_as_png(html_file, png_file, width=600, height=925, wait_time=5):
     """Convert HTML map to PNG using Playwright"""
     html_path = os.path.abspath(html_file)
     file_url = f"file://{html_path}"
@@ -551,12 +574,12 @@ def save_map_as_png(html_file, png_file, width=1200, height=900, wait_time=5):
             browser = playwright.chromium.launch(headless=True)
             try:
                 context = browser.new_context(
-                    viewport={"width": width, "height": height}
+                    viewport={"width": width, "height": height}, device_scale_factor=3
                 )
                 page = context.new_page()
                 page.goto(file_url)
                 page.wait_for_timeout(wait_time * 1000)
-                page.screenshot(path=png_file, full_page=True)
+                page.screenshot(path=png_file, full_page=False, type="png")
             finally:
                 browser.close()
     except Exception as e:
@@ -570,6 +593,9 @@ def main():
     # Load agent traces with SVI
     agent_traces = load_agent_traces_with_svi()
 
+    # Create colormap based on SVI values
+    colormap, min_svi, max_svi = get_svi_colormap(agent_traces)
+    # min_svi += 0.2
     # Load evacuation area
     evacuation_polygon = None
     try:
@@ -597,12 +623,15 @@ def main():
     modes = ["VEHICLE", "BIKE", "WALKING"]
 
     for mode in modes:
-        output_html = f"evacuation_map_{mode.lower()}.html"
-        output_png = f"evacuation_map_{mode.lower()}.png"
+        output_html = f"plots/evacuation_maps/evacuation_map_{mode.lower()}.html"
+        output_png = f"plots/evacuation_maps/evacuation_map_{mode.lower()}.png"
 
         create_mode_specific_map(
             agent_traces=agent_traces,
             mode=mode,
+            colormap=colormap,
+            min_svi=min_svi,
+            max_svi=max_svi,
             evacuation_area=evacuation_polygon,
             geojson_path=geojson_path,
             output_html=output_html,

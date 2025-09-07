@@ -2289,6 +2289,8 @@ class EvacuationModel(ap.Model):
             "BIKE": "BIKE",
             "BICYCLE": "BIKE",
             "CYCLING": "BIKE",
+            "ELECT_SCOOTER": "CAR",
+            "ELECT_BIKE": "CAR",
         }
         return mode_mapping.get(mode, "WALKING")  # Default to walking
 

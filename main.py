@@ -89,9 +89,7 @@ def main():
     )
     gc.collect()
 
-    agents_gatherer.read_and_summarize_agents(
-        fallback_to_full_trace=False, verbose=False
-    )
+    agents_gatherer.read_and_summarize_agents(fallback_to_full_trace=True, verbose=True)
     agents_df = pl.read_csv("data/mesa_initializers.csv")
 
     if agents_df.is_empty():
