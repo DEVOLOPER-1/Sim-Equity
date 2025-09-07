@@ -1,478 +1,548 @@
 """
-Fixed visualization script with proper coordinate handling and debugging
+Enhanced academic visualization with 3 SVI quartiles and improved styling
 """
 
-import colorsys
+import math
 import os
-import random
+from collections import defaultdict
 
 import folium
 import geojson
+import numpy as np
 import polars as pl
 from playwright.sync_api import sync_playwright
 from shapely.geometry import mapping
+from sklearn.cluster import DBSCAN
+
+# Vulnerability color scheme with 3 quartiles
+VULNERABILITY_COLORS = {
+    "low": "#27AE60",  # Green
+    "moderate": "#F39C12",  # Orange
+    "high": "#E74C3C",  # Red
+}
+
+# Mode-specific styling
+MODE_STYLES = {
+    "VEHICLE": {"color": "#3498DB", "weight": 3, "opacity": 0.7, "dashArray": None},
+    "BIKE": {"color": "#9B59B6", "weight": 2, "opacity": 0.7, "dashArray": None},
+    "WALKING": {"color": "#2ECC71", "weight": 2, "opacity": 0.7, "dashArray": None},
+    "PUBLIC_TRANSPORT": {
+        "color": "#E74C3C",
+        "weight": 2,
+        "opacity": 0.7,
+        "dashArray": "5, 10",
+    },
+}
 
 
-def load_agent_traces():
+def load_agent_traces_with_svi():
     """
-    Load all agent traces from CSV files with robust coordinate handling.
+    Load agent traces with SVI information and additional metadata
 
     Returns:
-        dict: Dictionary with agent IDs as keys and their path data as values
+        dict: Dictionary with agent IDs as keys and their full trace data as values
     """
-    print("Loading agent traces...")
+    print("Loading agent traces with SVI...")
 
-    # Read agent IDs from statistics file
+    # Read agent statistics to get SVI values
     try:
-        agents_ids = pl.Series(
-            pl.read_csv("simulation_outcomes/Agents_Statistics_Trial.csv").select(
-                "agent_id"
-            )
-        ).to_list()
+        stats_df = pl.read_csv("simulation_outcomes/Agents_Statistics_Trial.csv")
+        svi_mapping = {
+            row["agent_id"]: row.get("svi_normalized", 0.5)
+            for row in stats_df.iter_rows(named=True)
+        }
+        print(f"Loaded SVI for {len(svi_mapping)} agents")
     except Exception as e:
         print(f"Error reading agent statistics: {e}")
-        return {}
+        svi_mapping = {}
 
     agent_traces = {}
     traces_loaded = 0
-    coordinate_issues = 0
     all_entries = os.listdir("simulation_outcomes/agents_traces")
-    print(all_entries)
+
     for ag in all_entries:
         try:
             trace_file = f"simulation_outcomes/agents_traces/{ag}"
             if not os.path.exists(trace_file):
-                print(f"Trace file not found for agent {ag}")
                 continue
 
             df = pl.read_csv(trace_file)
-
             if df.is_empty():
-                print(f"Empty trace file for agent {ag}")
                 continue
 
-            # debug first trace structure
-            if traces_loaded == 0:
-                print(f"\nDEBUG - First agent ({ag}) data structure:")
-                print(f"Columns: {df.columns}")
-                print(f"Shape: {df.shape}")
-                print("First 3 rows:")
-                print(df.head(3))
+            # Extract agent ID from filename
+            agent_id = ag.replace(".csv", "").replace("agent_", "")
 
-            # We expect columns 'x' and 'y' but their semantics may be swapped.
+            # Get SVI for this agent
+            svi = svi_mapping.get(agent_id, 0.5)
+
+            # Determine coordinate columns (similar to previous approach)
             if "x" not in df.columns or "y" not in df.columns:
-                print(f"Missing x/y columns for agent {ag}, skipping")
                 continue
 
-            # Take first non-null sample values to determine which column is lat/lon
+            # Sample coordinates to determine lat/lon
             sample_x = None
             sample_y = None
             try:
-                sample_x = float(df.select("x").drop_nulls().to_series()[0])
-                sample_y = float(df.select("y").drop_nulls().to_series()[0])
-            except Exception:
-                # fallback to iter_rows if above fails
                 for r in df.select(["x", "y"]).iter_rows():
                     if r[0] is not None and r[1] is not None:
                         sample_x = float(r[0])
                         sample_y = float(r[1])
                         break
+            except Exception:
+                continue
 
             if sample_x is None or sample_y is None:
-                print(f"No sample coordinates for agent {ag}, skipping")
                 continue
 
-            # Heuristic: lat values for Paris should be ~48.x, lon ~1..4
-            # Determine which column is lat and which is lon
+            # Determine which is lat and which is lon
             if 40 <= sample_x <= 55 and -20 <= sample_y <= 20:
-                # x looks like latitude, y looks like longitude
                 lat_col, lon_col = "x", "y"
             elif 40 <= sample_y <= 55 and -20 <= sample_x <= 20:
-                # y is latitude, x is longitude (the common case)
                 lat_col, lon_col = "y", "x"
             else:
-                # Unknown: fall back to assumption that y is lat and x is lon,
-                # but print a warning so you can inspect.
                 lat_col, lon_col = "y", "x"
-                print(
-                    f"Warning: Could not confidently determine lat/lon columns for agent {ag}. "
-                    f"Sample values: x={sample_x}, y={sample_y}. Assuming {lat_col}=lat, {lon_col}=lon."
-                )
 
-            # Select coordinates with determined order
-            coordinates_df = df.select([lat_col, lon_col]).drop_nulls()
-            if coordinates_df.is_empty():
-                print(
-                    f"No valid coordinates for agent {ag} after selecting {lat_col},{lon_col}"
-                )
-                continue
-
+            # Extract all data
             coordinates = []
-            for row in coordinates_df.iter_rows():
-                lat, lon = float(row[0]), float(row[1])  # now row[0]=lat, row[1]=lon
-                # Validate numeric
-                if not (abs(lat) < 1e6 and abs(lon) < 1e6):
-                    coordinate_issues += 1
-                    if coordinate_issues <= 5:
-                        print(
-                            f"Invalid numeric coords for agent {ag}: lat={lat}, lon={lon}"
+            modes = []
+            public_transport = []
+            timestamps = []
+
+            for row in df.iter_rows(named=True):
+                try:
+                    lat = float(row[lat_col])
+                    lon = float(row[lon_col])
+                    if abs(lat) < 1e6 and abs(lon) < 1e6:
+                        coordinates.append([lat, lon])
+                        mode_val = row.get("mode", "UNKNOWN")
+                        # Rename CAR to VEHICLE
+                        if mode_val == "CAR":
+                            mode_val = "VEHICLE"
+                        modes.append(mode_val)
+                        public_transport.append(
+                            row.get("using_public_transport", False)
                         )
+                        timestamps.append(row.get("time", 0))
+                except (ValueError, TypeError):
                     continue
 
-                coordinates.append([lat, lon])  # Folium expects [lat, lon]
-
             if len(coordinates) >= 2:
-                agent_traces[ag] = coordinates
+                agent_traces[agent_id] = {
+                    "coordinates": coordinates,
+                    "modes": modes,
+                    "public_transport": public_transport,
+                    "timestamps": timestamps,
+                    "svi": svi,
+                }
                 traces_loaded += 1
-                if traces_loaded == 1:
-                    print(f"DEBUG - Agent {ag} coordinates sample:")
-                    print(f"  Sample lat,lon first point: {coordinates[0]} (lat, lon)")
-                    print(f"  Sample lat,lon last point: {coordinates[-1]} (lat, lon)")
-                    print(f"  Path length: {len(coordinates)} points")
-            else:
-                print(
-                    f"Agent {ag}: insufficient valid coordinates ({len(coordinates)} points)"
-                )
 
         except Exception as e:
             print(f"Error loading trace for agent {ag}: {e}")
 
-    print(f"\nSUMMARY:")
-    print(
-        f"Successfully loaded traces for {traces_loaded} out of {len(agents_ids)} agents"
-    )
-    print(f"Coordinate issues found: {coordinate_issues}")
+    print(f"Successfully loaded traces for {traces_loaded} agents")
     return agent_traces
 
 
-def debug_evacuation_area(evacuation_area):
-    """Debug function to check evacuation area properties"""
-    print("\n=== DEBUGGING EVACUATION AREA ===")
-
-    if evacuation_area is None:
-        print("ERROR: evacuation_area is None")
-        return False
-
-    print(f"Type: {type(evacuation_area)}")
-
-    try:
-        from shapely.geometry.base import BaseGeometry
-
-        if not isinstance(evacuation_area, BaseGeometry):
-            print(f"ERROR: Not a Shapely geometry object")
-            return False
-
-        print(f"Geometry type: {evacuation_area.geom_type}")
-        print(f"Is valid: {evacuation_area.is_valid}")
-        print(f"Is empty: {evacuation_area.is_empty}")
-
-        # Get bounds
-        bounds = evacuation_area.bounds
-        print(f"Bounds (minx, miny, maxx, maxy): {bounds}")
-
-        # Convert to GeoJSON to check structure
-        geojson_dict = mapping(evacuation_area)
-        print(f"GeoJSON type: {geojson_dict.get('type')}")
-
-        if geojson_dict.get("type") == "Polygon":
-            coords = geojson_dict.get("coordinates", [])
-            if coords:
-                exterior_ring = coords[0]
-                print(f"Number of exterior points: {len(exterior_ring)}")
-                print(f"First few points: {exterior_ring[:3]}")
-
-                # Check coordinate order and values
-                first_point = exterior_ring[0]
-                if len(first_point) >= 2:
-                    x, y = first_point[0], first_point[1]  # GeoJSON is [lon, lat]
-                    print(f"First point (GeoJSON format) - lon: {x}, lat: {y}")
-
-                    # Validate that coordinates are reasonable for Paris area
-                    if 1.0 <= x <= 4.0 and 48.0 <= y <= 50.0:
-                        print("✅ Coordinates appear correct for Paris region")
-                    else:
-                        print(f"⚠️ Coordinates may be outside expected Paris region")
-
-        return True
-
-    except Exception as e:
-        print(f"ERROR during evacuation area debug: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+def categorize_svi(svi_value):
+    """Categorize SVI value into 3 equal quartiles (0-0.33, 0.33-0.66, 0.66-1)"""
+    if svi_value <= 0.33:
+        return "low"
+    elif svi_value <= 0.66:
+        return "moderate"
+    else:
+        return "high"
 
 
-def generate_distinct_colors(n):
-    """Generate n visually distinct colors"""
-    colors = []
-    for i in range(n):
-        hue = i / n
-        saturation = 0.7 + random.random() * 0.3
-        value = 0.7 + random.random() * 0.3
-        r, g, b = colorsys.hsv_to_rgb(hue, saturation, value)
-        color = "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
-        colors.append(color)
-    return colors
+def detect_bottlenecks(agent_traces, mode=None, epsilon=0.01, min_samples=3):
+    """
+    Detect bottlenecks where multiple agents paths converge
+
+    Args:
+        agent_traces: Dictionary of agent traces
+        mode: Filter by specific mode (optional)
+        epsilon: DBSCAN parameter for spatial clustering
+        min_samples: DBSCAN parameter for minimum points in cluster
+
+    Returns:
+        list: Bottleneck points with agent counts
+    """
+    print(f"Detecting bottlenecks for mode: {mode}")
+
+    # Collect all points from agent paths
+    all_points = []
+    point_agents = []  # Track which agent each point belongs to
+
+    for agent_id, data in agent_traces.items():
+        # Filter by mode if specified
+        if mode and not any(m == mode for m in data["modes"]):
+            continue
+
+        # Add all points from this agent
+        for i, coord in enumerate(data["coordinates"]):
+            # For efficiency, sample points (every 5th point)
+            if i % 5 == 0:
+                all_points.append(coord)
+                point_agents.append(agent_id)
+
+    if not all_points:
+        return []
+
+    # Convert to numpy array for clustering
+    points_array = np.array(all_points)
+
+    # Use DBSCAN to find dense clusters
+    clustering = DBSCAN(eps=epsilon, min_samples=min_samples).fit(points_array)
+    labels = clustering.labels_
+
+    # Count agents in each cluster (excluding noise points with label=-1)
+    cluster_agents = defaultdict(set)
+    for i, label in enumerate(labels):
+        if label != -1:  # Not noise
+            cluster_agents[label].add(point_agents[i])
+
+    # Calculate cluster centers and counts
+    bottlenecks = []
+    for label, agents in cluster_agents.items():
+        if len(agents) >= min_samples:  # Only include significant bottlenecks
+            cluster_points = points_array[labels == label]
+            center = np.mean(cluster_points, axis=0)
+            bottlenecks.append(
+                {
+                    "location": [center[0], center[1]],
+                    "agent_count": len(agents),
+                    "cluster_points": cluster_points,
+                }
+            )
+
+    # Sort by agent count
+    bottlenecks.sort(key=lambda x: x["agent_count"], reverse=True)
+
+    print(f"Found {len(bottlenecks)} bottlenecks")
+    return bottlenecks
 
 
-def create_research_map(
-    geojson_path: str,
-    agent_paths: dict = None,
+def categorize_bottlenecks(bottlenecks):
+    """Categorize bottlenecks into three levels based on agent count"""
+    if not bottlenecks:
+        return []
+
+    counts = [b["agent_count"] for b in bottlenecks]
+    min_count, max_count = min(counts), max(counts)
+
+    # Define thresholds for three levels
+    if max_count - min_count < 3:
+        # Small range, use equal intervals
+        threshold1 = min_count + (max_count - min_count) / 3
+        threshold2 = min_count + 2 * (max_count - min_count) / 3
+    else:
+        # Use percentiles
+        threshold1 = np.percentile(counts, 33)
+        threshold2 = np.percentile(counts, 66)
+
+    categorized = []
+    for bottleneck in bottlenecks:
+        count = bottleneck["agent_count"]
+        if count <= threshold1:
+            level = "low"
+        elif count <= threshold2:
+            level = "medium"
+        else:
+            level = "high"
+
+        categorized.append(
+            {"location": bottleneck["location"], "agent_count": count, "level": level}
+        )
+
+    return categorized
+
+
+def create_mode_specific_map(
+    agent_traces,
+    mode,
     evacuation_area=None,
-    max_agents_to_display: int = 20,
-    output_html: str = "research_map.html",
-    output_png: str = "research_map.png",
-    title: str = "Île-de-France Region",
+    geojson_path=None,
+    output_html=None,
+    output_png=None,
+    title_suffix="",
 ):
     """
-    Create a clean, research-paper styled map with PNG export capability.
+    Create a map for a specific transportation mode
+
+    Args:
+        agent_traces: Dictionary of agent traces
+        mode: Transportation mode to visualize
+        evacuation_area: Shapely polygon of evacuation area
+        geojson_path: Path to region GeoJSON file
+        output_html: Output HTML filename
+        output_png: Output PNG filename
+        title_suffix: Additional text for map title
     """
+    print(f"Creating map for mode: {mode}")
+
+    # Academic color scheme
     colors = {
-        "primary": "#4C72B0",
-        "secondary": "#55A868",
-        "highlight": "#C44E52",
-        "border": "#8C8C8C",
         "background": "#FFFFFF",
-        "evacuation": "#FF6B6B",  # More visible red
-        "evacuation_border": "#DC143C",
+        "border": "#34495E",
+        "evacuation_border": "#E74C3C",
+        "text": "#2C3E50",
     }
 
-    # Debug evacuation area first
-    if evacuation_area is not None:
-        evacuation_valid = debug_evacuation_area(evacuation_area)
-        if not evacuation_valid:
-            print("WARNING: Evacuation area has issues, proceeding without it")
-            evacuation_area = None
-
-    # Load the GeoJSON data
-    try:
-        with open(geojson_path, "r") as file:
-            geojson_data = geojson.load(file)
-        print("✅ Successfully loaded region GeoJSON")
-    except Exception as e:
-        print(f"ERROR loading GeoJSON: {e}")
-        geojson_data = None
-
-    # Create map with clean styling - start with a wider view
+    # Create map with academic styling
     map_ = folium.Map(
         location=[48.8566, 2.3522],  # Paris coordinates
-        zoom_start=8,  # Wider initial zoom
-        tiles="cartodb positron",
+        zoom_start=9,
+        tiles="CartoDB positron",  # Clean, academic base map
         prefer_canvas=True,
         control_scale=True,
+        attr="Academic Visualization",
     )
 
-    # Add the GeoJSON region boundaries
-    if geojson_data:
-        geo_json = folium.GeoJson(
-            geojson_data,
-            name="Region Boundaries",
-            style_function=lambda feature: {
-                "fillColor": colors["primary"],
-                "color": colors["border"],
-                "weight": 2,
-                "fillOpacity": 0.1,
-                "opacity": 0.8,
-            },
-            tooltip="Île-de-France Region",
-        ).add_to(map_)
-
-        # Fit map bounds to the GeoJSON
+    # Add region boundaries if GeoJSON provided
+    if geojson_path and os.path.exists(geojson_path):
         try:
-            map_.fit_bounds(geo_json.get_bounds(), padding=(20, 20))
-            print("✅ Added region boundaries and fitted bounds")
-        except Exception as e:
-            print(f"Warning: Could not fit bounds to GeoJSON: {e}")
+            with open(geojson_path, "r") as file:
+                geojson_data = geojson.load(file)
 
-    # Add evacuation area
+            folium.GeoJson(
+                geojson_data,
+                name="Region Boundaries",
+                style_function=lambda feature: {
+                    "fillColor": "transparent",
+                    "color": colors["border"],
+                    "weight": 1.5,
+                    "fillOpacity": 0,
+                    "opacity": 0.7,
+                },
+                tooltip="Île-de-France Region",
+            ).add_to(map_)
+        except Exception as e:
+            print(f"Error loading GeoJSON: {e}")
+
+    # Add evacuation area with dashed border
     if evacuation_area is not None:
         try:
-            print("Adding evacuation area to map...")
             evacuation_geojson = mapping(evacuation_area)
-
-            evacuation_layer = folium.GeoJson(
+            folium.GeoJson(
                 evacuation_geojson,
-                name="🚨 Evacuation Area",
+                name="Evacuation Area",
                 style_function=lambda x: {
-                    "fillColor": colors["evacuation"],
+                    "fillColor": "transparent",
                     "color": colors["evacuation_border"],
                     "weight": 3,
-                    "fillOpacity": 0.3,
-                    "opacity": 1.0,
+                    "fillOpacity": 0,
+                    "opacity": 0.8,
+                    "dashArray": "10, 10",
                 },
-                popup=folium.Popup("EVACUATION AREA", max_width=200),
-                tooltip="🚨 EVACUATION AREA 🚨",
-            )
-            evacuation_layer.add_to(map_)
-            print("✅ Successfully added evacuation area to map")
-
+                tooltip="Evacuation Area",
+            ).add_to(map_)
         except Exception as e:
-            print(f"ERROR adding evacuation area: {e}")
+            print(f"Error adding evacuation area: {e}")
 
-    # Add agent paths with enhanced debugging
-    if agent_paths and len(agent_paths) > 0:
-        print(f"\n=== ADDING AGENT PATHS ===")
-        print(f"Total agent paths available: {len(agent_paths)}")
+    # Filter agents by mode and add their paths
+    agents_added = 0
+    for agent_id, data in agent_traces.items():
+        # Check if agent used this mode at any point
+        if mode not in data["modes"]:
+            continue
 
-        # Create a feature group for agent paths
-        agent_layer = folium.FeatureGroup(name="Agent Paths", show=True)
+        coordinates = data["coordinates"]
+        modes = data["modes"]
+        public_transport = data["public_transport"]
+        svi = data["svi"]
 
-        # Get agent IDs and limit display
-        agent_ids = list(agent_paths.keys())[:max_agents_to_display]
-        path_colors = generate_distinct_colors(len(agent_ids))
+        # Get vulnerability category and color
+        svi_category = categorize_svi(svi)
+        color = VULNERABILITY_COLORS[svi_category]
 
-        paths_added = 0
-        valid_paths = 0
+        # Split path into segments based on mode and public transport
+        segments = []
+        current_segment = []
+        current_style = MODE_STYLES[mode].copy()
 
-        for idx, agent_id in enumerate(agent_ids):
-            path = agent_paths[agent_id]
-            color = path_colors[idx]
+        for i, (coord, agent_mode, is_public) in enumerate(
+            zip(coordinates, modes, public_transport)
+        ):
+            # Check if we're still in the same mode
+            if agent_mode == mode:
+                # For WALKING and BIKE, check public transport usage
+                if mode in ["WALKING", "BIKE"]:
+                    if is_public:
+                        segment_style = MODE_STYLES["PUBLIC_TRANSPORT"].copy()
+                    else:
+                        segment_style = MODE_STYLES[mode].copy()
+                else:
+                    segment_style = MODE_STYLES[mode].copy()
 
-            # Debug first few agents
-            if idx < 3:
-                print(f"\nDEBUG Agent {agent_id}:")
-                print(f"  Path length: {len(path)} points")
-                print(f"  First point: {path[0]} (lat={path[0][0]}, lon={path[0][1]})")
-                print(
-                    f"  Last point: {path[-1]} (lat={path[-1][0]}, lon={path[-1][1]})"
-                )
-                print(f"  Color: {color}")
+                # If style changed, finalize current segment and start new one
+                if current_segment and segment_style != current_style:
+                    segments.append((current_segment, current_style))
+                    current_segment = []
 
-                # Validate coordinates are reasonable for Paris
-                lat_check = 48.0 <= path[0][0] <= 50.0
-                lon_check = 1.0 <= path[0][1] <= 4.0
-                print(
-                    f"  Coordinate validation: lat_ok={lat_check}, lon_ok={lon_check}"
-                )
+                current_style = segment_style
+                current_segment.append(coord)
+            else:
+                # Mode changed, finalize current segment
+                if current_segment:
+                    segments.append((current_segment, current_style))
+                    current_segment = []
 
-            if len(path) < 2:
-                print(f"Skipping agent {agent_id}: insufficient points ({len(path)})")
+        # Add the last segment if it exists
+        if current_segment:
+            segments.append((current_segment, current_style))
+
+        # Add all segments to map
+        for segment, style in segments:
+            if len(segment) < 2:
                 continue
 
-            try:
-                # Validate that coordinates are reasonable
-                first_point = path[0]
-                if len(first_point) != 2:
-                    print(f"Invalid point format for agent {agent_id}: {first_point}")
-                    continue
+            # Add vulnerability color to style
+            style["color"] = color
 
-                lat, lon = first_point[0], first_point[1]
-                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                    print(
-                        f"Invalid coordinates for agent {agent_id}: lat={lat}, lon={lon}"
-                    )
-                    continue
-
-                # Check if path is within reasonable bounds for Paris region
-                if not (47.0 <= lat <= 50.0 and 1.0 <= lon <= 4.0):
-                    print(
-                        f"Agent {agent_id} outside Paris region: lat={lat}, lon={lon}"
-                    )
-                    # Continue anyway, might be valid
-
-                valid_paths += 1
-
-                # Add path line with higher weight for visibility
-                folium.PolyLine(
-                    path,
-                    color=color,
-                    weight=3,  # Increased weight
-                    opacity=0.8,  # Higher opacity
-                    tooltip=f"Agent {agent_id} (Path)",
-                ).add_to(agent_layer)
-
-                # Add start marker (green)
-                folium.CircleMarker(
-                    path[0],
-                    radius=8,  # Larger radius
-                    color="green",
-                    fill=True,
-                    fillColor="lightgreen",
-                    fill_opacity=0.8,
-                    tooltip=f"Agent {agent_id} START",
-                ).add_to(agent_layer)
-
-                # Add end marker (red)
-                folium.CircleMarker(
-                    path[-1],
-                    radius=8,  # Larger radius
-                    color="red",
-                    fill=True,
-                    fillColor="lightcoral",
-                    fill_opacity=0.8,
-                    tooltip=f"Agent {agent_id} END",
-                ).add_to(agent_layer)
-
-                paths_added += 1
-
-            except Exception as e:
-                print(f"Error adding path for agent {agent_id}: {e}")
-
-        # Add the layer to the map
-        agent_layer.add_to(map_)
-
-        print(f"\n=== AGENT PATHS SUMMARY ===")
-        print(f"Valid paths found: {valid_paths}")
-        print(f"Paths successfully added: {paths_added}")
-        print(f"✅ Agent paths layer added to map")
-
-        # If no paths were added, add a debug marker
-        if paths_added == 0:
-            print("⚠️ NO PATHS ADDED - Adding debug marker at Paris center")
-            folium.Marker(
-                [48.8566, 2.3522],
-                popup="DEBUG: No agent paths were displayed",
-                tooltip="Debug Marker",
-                icon=folium.Icon(color="red", icon="exclamation-sign"),
+            folium.PolyLine(
+                segment,
+                **style,
+                tooltip=f"Agent {agent_id} (SVI: {svi_category})",
             ).add_to(map_)
 
-    else:
-        print("No agent paths provided")
+        # Add end marker only (small and subtle)
+        if coordinates:
+            folium.CircleMarker(
+                coordinates[-1],
+                radius=3,
+                color=color,
+                fill=True,
+                fillColor=color,
+                fill_opacity=0.7,
+                tooltip=f"Agent {agent_id} endpoint",
+            ).add_to(map_)
 
-    # Add layer control
-    folium.LayerControl().add_to(map_)
+        agents_added += 1
+
+    print(f"Added {agents_added} agents for mode {mode}")
+
+    # Detect and add bottlenecks
+    bottlenecks = detect_bottlenecks(agent_traces, mode=mode)
+    categorized_bottlenecks = categorize_bottlenecks(bottlenecks)
+
+    # Add bottlenecks to map with adaptive spacing
+    added_bottlenecks = set()
+    min_distance = 0.02  # Minimum distance between bottleneck markers (degrees)
+
+    for bottleneck in categorized_bottlenecks:
+        location = bottleneck["location"]
+        count = bottleneck["agent_count"]
+        level = bottleneck["level"]
+
+        # Check if too close to existing bottleneck
+        too_close = False
+        for added_loc in added_bottlenecks:
+            dist = math.sqrt(
+                (location[0] - added_loc[0]) ** 2 + (location[1] - added_loc[1]) ** 2
+            )
+            if dist < min_distance:
+                too_close = True
+                break
+
+        if not too_close:
+            # Determine marker size based on level
+            if level == "low":
+                radius = 8
+                color = "#27AE60"
+            elif level == "medium":
+                radius = 12
+                color = "#F39C12"
+            else:  # high
+                radius = 16
+                color = "#E74C3C"
+
+            # Create bottleneck marker
+            folium.CircleMarker(
+                location,
+                radius=radius,
+                color=color,
+                fill=True,
+                fillColor=color,
+                fill_opacity=0.7,
+                popup=folium.Popup(f"Bottleneck: {count} agents", max_width=200),
+                tooltip=f"Bottleneck: {count} agents",
+            ).add_to(map_)
+
+            # Add text with agent count
+            folium.Marker(
+                location,
+                icon=folium.DivIcon(
+                    html=f'<div style="font-size: 10px; color: white; text-align: center; font-weight: bold;">{count}</div>'
+                ),
+            ).add_to(map_)
+
+            added_bottlenecks.add(tuple(location))
+
+    print(f"Added {len(added_bottlenecks)} bottleneck markers")
+
+    # Add legend
+    legend_html = f"""
+    <div style="position: fixed; 
+                bottom: 50px; right: 50px; 
+                background-color: white; 
+                border: 2px solid grey;
+                border-radius: 5px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+                z-index: 9999; 
+                padding: 15px;
+                font-family: Arial;
+                font-size: 12px;">
+        <h4 style="margin-top: 0; margin-bottom: 10px;">Legend</h4>
+        <p style="margin: 2px 0;"><span style="color: {VULNERABILITY_COLORS['low']};">■</span> Low Vulnerability (SVI ≤ 0.33)</p>
+        <p style="margin: 2px 0;"><span style="color: {VULNERABILITY_COLORS['moderate']};">■</span> Moderate Vulnerability (0.33 < SVI ≤ 0.66)</p>
+        <p style="margin: 2px 0;"><span style="color: {VULNERABILITY_COLORS['high']};">■</span> High Vulnerability (SVI > 0.66)</p>
+        <p style="margin: 2px 0;"><span style="color: {MODE_STYLES['PUBLIC_TRANSPORT']['color']}; text-decoration: line-through;">---</span> Public Transport Segment</p>
+        <p style="margin: 10px 0 5px 0;"><strong>Bottlenecks:</strong></p>
+        <p style="margin: 2px 0;"><span style="color: #27AE60;">●</span> Low congestion</p>
+        <p style="margin: 2px 0;"><span style="color: #F39C12;">●</span> Medium congestion</p>
+        <p style="margin: 2px 0;"><span style="color: #E74C3C;">●</span> High congestion</p>
+    </div>
+    """
+    map_.get_root().html.add_child(folium.Element(legend_html))
 
     # Add title
+    mode_display_name = "Vehicle" if mode == "VEHICLE" else mode.title()
     title_html = f"""
-        <div style="position: fixed; 
-                    top: 10px; left: 50px; 
-                    background-color: white; 
-                    border: 2px solid #333;
-                    border-radius: 5px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-                    z-index: 9999; 
-                    padding: 15px;">
-            <h4 style="margin: 0; font-family: Arial; font-size: 16px; color: #333; font-weight: bold;">{title}</h4>
-        </div>
-        """
+    <div style="position: fixed; 
+                top: 10px; left: 50px; 
+                background-color: white; 
+                border: 2px solid grey;
+                border-radius: 5px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+                z-index: 9999; 
+                padding: 10px 15px;">
+        <h4 style="margin: 0; font-family: Arial; font-size: 16px; color: #2C3E50;">
+            {mode_display_name} Evacuation Paths{title_suffix}
+        </h4>
+    </div>
+    """
     map_.get_root().html.add_child(folium.Element(title_html))
 
-    # Save HTML
-    try:
-        map_.save(output_html)
-        print(f"✅ Map saved as HTML: {output_html}")
-    except Exception as e:
-        print(f"ERROR saving HTML: {e}")
+    # Save outputs
+    if output_html:
+        try:
+            map_.save(output_html)
+            print(f"Map saved as HTML: {output_html}")
+        except Exception as e:
+            print(f"Error saving HTML: {e}")
 
-    # Save as PNG
-    try:
-        save_map_as_png(output_html, output_png)
-        print(f"✅ Map saved as PNG: {output_png}")
-    except Exception as e:
-        print(f"ERROR saving PNG: {e}")
+    if output_png:
+        try:
+            save_map_as_png(output_html, output_png)
+            print(f"Map saved as PNG: {output_png}")
+        except Exception as e:
+            print(f"Error saving PNG: {e}")
 
     return map_
 
 
-def save_map_as_png(
-    html_file: str,
-    png_file: str,
-    width: int = 1200,
-    height: int = 900,
-    wait_time: int = 5,
-):
-    """Convert HTML map to PNG using Playwright."""
+def save_map_as_png(html_file, png_file, width=1200, height=900, wait_time=5):
+    """Convert HTML map to PNG using Playwright"""
     html_path = os.path.abspath(html_file)
     file_url = f"file://{html_path}"
 
@@ -493,12 +563,12 @@ def save_map_as_png(
         print(f"Error during PNG conversion: {e}")
 
 
-# Example usage
-if __name__ == "__main__":
-    print("Starting map visualization with enhanced debugging...")
+def main():
+    """Main function to create all three mode-specific maps"""
+    print("Starting enhanced academic visualization...")
 
-    # Load agent traces with improved debugging
-    agent_traces = load_agent_traces()
+    # Load agent traces with SVI
+    agent_traces = load_agent_traces_with_svi()
 
     # Load evacuation area
     evacuation_polygon = None
@@ -513,38 +583,41 @@ if __name__ == "__main__":
             (SCENARIO_CENTER_LAT, SCENARIO_CENTER_LON), SCENARIO_RADIUS_KM
         )
         evacuation_polygon = env_init.get_made_polygon
-        print("✅ Successfully loaded actual evacuation area")
-
+        print("Successfully loaded evacuation area")
     except Exception as e:
-        print(f"Could not load actual evacuation area: {e}")
+        print(f"Could not load evacuation area: {e}")
 
     # Check GeoJSON file
     geojson_path = "data/departements-ile-de-france.geojson"
     if not os.path.exists(geojson_path):
-        print(f"WARNING: GeoJSON file not found at {geojson_path}")
+        print(f"Warning: GeoJSON file not found at {geojson_path}")
+        geojson_path = None
 
-    # Create the map with enhanced settings
-    try:
-        research_map = create_research_map(
-            geojson_path=geojson_path,
-            agent_paths=agent_traces,
+    # Create maps for each mode
+    modes = ["VEHICLE", "BIKE", "WALKING"]
+
+    for mode in modes:
+        output_html = f"evacuation_map_{mode.lower()}.html"
+        output_png = f"evacuation_map_{mode.lower()}.png"
+
+        create_mode_specific_map(
+            agent_traces=agent_traces,
+            mode=mode,
             evacuation_area=evacuation_polygon,
-            max_agents_to_display=1000,  # Show more agents
-            output_html="agent_evacuation_paths_debug.html",
-            output_png="agent_evacuation_paths_debug.png",
-            title="Île-de-France Region: Agent Evacuation Paths (Debug Version)",
+            geojson_path=geojson_path,
+            output_html=output_html,
+            output_png=output_png,
+            title_suffix=" - Île-de-France Region",
         )
 
-        print("\n" + "=" * 50)
-        print("🎉 DEBUG MAP CREATED SUCCESSFULLY!")
-        print("=" * 50)
-        print("Check the files:")
-        print("- agent_evacuation_paths_debug.html")
-        print("- agent_evacuation_paths_debug.png")
-        print("=" * 50)
+    print("\n" + "=" * 60)
+    print("ACADEMIC VISUALIZATION COMPLETE!")
+    print("Created three mode-specific maps:")
+    for mode in modes:
+        print(f"  - evacuation_map_{mode.lower()}.html")
+        print(f"  - evacuation_map_{mode.lower()}.png")
+    print("=" * 60)
 
-    except Exception as e:
-        print(f"ERROR creating map: {e}")
-        import traceback
 
-        traceback.print_exc()
+if __name__ == "__main__":
+    main()
