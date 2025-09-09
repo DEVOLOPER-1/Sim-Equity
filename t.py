@@ -574,7 +574,7 @@ def save_map_as_png(html_file, png_file, width=600, height=925, wait_time=5):
             browser = playwright.chromium.launch(headless=True)
             try:
                 context = browser.new_context(
-                    viewport={"width": width, "height": height}, device_scale_factor=1
+                    viewport={"width": width, "height": height},
                 )
                 page = context.new_page()
                 page.goto(file_url)
