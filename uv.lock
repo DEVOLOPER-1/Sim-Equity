@@ -2877,7 +2877,7 @@ wheels = [
 ]
 
 [[package]]
-name = "sim-equity"
+name = "seem"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

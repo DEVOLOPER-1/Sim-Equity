@@ -1,5 +1,5 @@
 [project]
-name = "sim-equity"
+name = "seem"
 version = "0.1.0"
 description = "Agent-based evacuation equity simulation using OSMnx, r5py, and AgentPy"
 requires-python = ">=3.12"

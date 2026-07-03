@@ -1,7 +1,7 @@
 # simulation/ — ABM Module Guide
 
 This directory contains the Agent-Based Model (ABM) that implements Stage 2 of
-the Sim-Equity methodology: simulating large-scale emergency evacuation in
+the SEEM methodology: simulating large-scale emergency evacuation in
 Île-de-France with Social Vulnerability Index (SVI)-driven agent behavior.
 
 For the full project overview, see the [root README](../README.md).

@@ -1,11 +1,11 @@
-# Sim-Equity: Agent-Based Simulation of Equitable Emergency Evacuation in Île-de-France
+# SEEM: Simulation of Equitable Emergency Mobility
 
 [![NetMob25](https://img.shields.io/badge/NetMob25-Data%20Challenge-blue)](https://netmob.org/www25/)
 <!--[![Zenodo](https://img.shields.io/badge/Zenodo-17074045-blue)](https://zenodo.org/records/17074045)-->
 [![Python](https://img.shields.io/badge/Python-3.12-green)](https://python.org)
 <!--[![License](https://img.shields.io/badge/License-MIT-lightgrey)](#license)-->
 
-> **Official companion repository** for the paper:
+> **Official repository** for the paper:
 > *A Simulation Study on Equitable Mobility During City Emergencies, Focusing on Vulnerable Groups*
 > Youssef M. Abdelhameid¹ · Dr. Noha Gamal Eldin²
 > ¹ School of Computational Sciences & AI, Zewail City of Science and Technology
@@ -105,7 +105,7 @@ For full methodological details, see [`simulation/README.md`](simulation/README.
 ## Repository Structure
 
 ```
-Sim-Equity/
+SEEM/
 │
 ├── README.md                     This file
 ├── pyproject.toml                Project and dependency configuration
@@ -201,8 +201,8 @@ dependency management.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/DEVOLOPER-1/Sim-Equity
-cd Sim-Equity
+git clone https://github.com/DEVOLOPER-1/SEEM
+cd SEEM
 
 # 2. Install with uv (recommended — uses uv.lock for exact versions)
 uv sync
@@ -331,7 +331,7 @@ contributors (ODbL).
 
 ## Contact
 
-|                          |                                    |
-|--------------------------|------------------------------------|
-| Youssef M. Abdelhameid  | s-youssef.hameid@zewailcity.edu.eg |
+|                        |                                    |
+|------------------------|------------------------------------|
+| Youssef M. Abdelhameid | s-youssef.hameid@zewailcity.edu.eg |
 | Noha Gamal Eldin       | ngamal@nu.edu.eg                   |
