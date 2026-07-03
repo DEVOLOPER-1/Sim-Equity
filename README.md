@@ -7,7 +7,7 @@
 
 > **Official companion repository** for the paper:
 > *A Simulation Study on Equitable Mobility During City Emergencies, Focusing on Vulnerable Groups*
-> Youssef M. Abdelhameid¹ · Dr.Noha Gamal ElDin²
+> Youssef M. Abdelhameid¹ · Dr. Noha Gamal Eldin²
 > ¹ School of Computational Sciences & AI, Zewail City of Science and Technology
 > ² Computer Science Program, Nile University
 
@@ -90,7 +90,7 @@ For full methodological details, see [`simulation/README.md`](simulation/README.
 ## Publication
 
 **NetMob25 Book of Abstracts:**
-> Y. M. Abdelhameid and N. Gamal ElDin, "A Simulation Study on Equitable
+> Y. M. Abdelhameid and N. Gamal Eldin, "A Simulation Study on Equitable
 > Mobility During City Emergencies, Focusing on Vulnerable Groups,"
 > *NetMob25 Data Challenge*, Paris, 2025.
 > [Book of Abstracts — NetMob25](https://netmob.org/www25/files/NetMob25_Book_of_Abstracts.pdf)
@@ -308,7 +308,7 @@ If you use this code, methodology, or results, please cite:
 @inproceedings{abdelhameid2025simequity,
   title     = {A Simulation Study on Equitable Mobility During City Emergencies,
                Focusing on Vulnerable Groups},
-  author    = {Abdelhameid, Youssef M. and Gamal ElDin, Noha},
+  author    = {Abdelhameid, Youssef M. and Gamal Eldin, Noha},
   booktitle = {NetMob25 Data Challenge},
   year      = {2025},
   address   = {Paris, France},
@@ -334,4 +334,4 @@ contributors (ODbL).
 |                          |                                    |
 |--------------------------|------------------------------------|
 | Youssef M. Abdelhameid  | s-youssef.hameid@zewailcity.edu.eg |
-| Noha Gamal ElDin        | ngamal@nu.edu.eg                   |
+| Noha Gamal Eldin       | ngamal@nu.edu.eg                   |

@@ -19,6 +19,7 @@ Expected runtime: 10–60 minutes per run depending on hardware and agent count.
 Progress is logged per simulation time step.
 
 Results are written to:
+
 - `outputs/simulation_runs/evacuation_simulation_{run_id}/` — per-run JSON metadata
 - `outputs/agent_states/final_agent_states.csv` — agent states at simulation end
 - `outputs/agent_states/fallback_agent_states.csv` — agents requiring fallback routing
@@ -74,14 +75,14 @@ scripts/main.py                          ← entry point
 
 ### Execution flow summary
 
-| Step | Module | Action |
-|---|---|---|
-| 1 | `preparing_resources.py` | Load and validate all network data |
-| 2 | `pre_process_amenities.py` | Build shelter/destination index |
-| 3 | `evacuation_area_initializer.py` | Define zone, assign destinations |
-| 4 | `agents_model_initializer.py` | Instantiate 3,300+ agents with SVI params |
-| 5 | `evacuation_model.py` (×N steps) | Simulate each agent per time step |
-| 6 | `simulation_analytics.py` | Export results and generate figures |
+| Step | Module                           | Action                                    |
+|------|----------------------------------|-------------------------------------------|
+| 1    | `preparing_resources.py`         | Load and validate all network data        |
+| 2    | `pre_process_amenities.py`       | Build shelter/destination index           |
+| 3    | `evacuation_area_initializer.py` | Define zone, assign destinations          |
+| 4    | `agents_model_initializer.py`    | Instantiate 3,300+ agents with SVI params |
+| 5    | `evacuation_model.py` (×N steps) | Simulate each agent per time step         |
+| 6    | `simulation_analytics.py`        | Export results and generate figures       |
 
 ---
 
@@ -97,7 +98,7 @@ The simulation is controlled by `simulation/configs/evacuation_simulation.json`.
     // Geographic parameters
     "crisis_center_lat": 48.8566,      // Paris (Notre-Dame)
     "crisis_center_lon": 2.3522,
-    "evacuation_radius_km": 50,        // Safe zone boundary
+    "evacuation_radius_km": 50,        // The evacuation zone is 50 km around the center
     "simulation_horizon_min": 180,     // 3-hour window
     "time_step_sec": 60                // 1-minute resolution
   },
@@ -130,11 +131,11 @@ The simulation is controlled by `simulation/configs/evacuation_simulation.json`.
 
 The behavioral parameters are the core of the SVI-to-simulation linkage:
 
-| Parameter | Description | SVI effect |
-|---|---|---|
-| `delay_sec` | Seconds before an agent begins evacuating after the crisis event | Higher SVI → longer delay |
-| `speed_mult` | Fraction of the nominal network speed the agent achieves | Higher SVI → slower |
-| `patience` | Fraction of nominal patience before the agent fails to reroute around congestion | Higher SVI → less tolerant |
+| Parameter    | Description                                                                      | SVI effect                 |
+|--------------|----------------------------------------------------------------------------------|----------------------------|
+| `delay_sec`  | Seconds before an agent begins evacuating after the crisis event                 | Higher SVI → longer delay  |
+| `speed_mult` | Fraction of the nominal network speed the agent achieves                         | Higher SVI → slower        |
+| `patience`   | Fraction of nominal patience before the agent fails to reroute around congestion | Higher SVI → less tolerant |
 
 ---
 
@@ -142,59 +143,60 @@ The behavioral parameters are the core of the SVI-to-simulation linkage:
 
 ### Inputs
 
-| Input | Path | Format | Description |
-|---|---|---|---|
-| Walk network | `data/maps/osmnx_layers/IDF_walk_network.graphml` | GraphML | Pedestrian road graph for IDF |
-| Bike network | `data/maps/osmnx_layers/IDF_bike_network.graphml` | GraphML | Cycling road graph |
-| Drive network | `data/maps/osmnx_layers/IDF_drive_network.graphml` | GraphML | Motorized vehicle road graph |
-| Transit network | `data/maps/osmnx_layers/IDF_transportation_network.graphml` | GraphML | Multimodal combined graph |
-| GTFS timetables | `data/maps/IDFM-gtfs/*.csv` | GTFS CSV | IDF public transit schedules (IDFM) |
-| Amenities | `data/maps/osmnx_layers/idf_amenities.csv` | CSV | OSM amenity locations (shelters, schools, hospitals) |
-| OSM raw | `data/maps/osm_chunks_pyrosm/*.osm.pbf` | PBF | Raw OSM extract for IDF (5 chunks) |
-| Config | `simulation/configs/evacuation_simulation.json` | JSON | Scenario + behavioral parameters |
-| Summary config | `simulation/configs/simulation_summary.json` | JSON | Aggregate run summary |
-| Route cache | `simulation/space/cache/*.json` | JSON | Pre-computed geometries (21 files, speeds up spatial lookups) |
+| Input           | Path                                                        | Format   | Description                                                   |
+|-----------------|-------------------------------------------------------------|----------|---------------------------------------------------------------|
+| Walk network    | `data/maps/osmnx_layers/IDF_walk_network.graphml`           | GraphML  | Pedestrian road graph for IDF                                 |
+| Bike network    | `data/maps/osmnx_layers/IDF_bike_network.graphml`           | GraphML  | Cycling road graph                                            |
+| Drive network   | `data/maps/osmnx_layers/IDF_drive_network.graphml`          | GraphML  | Motorized vehicle road graph                                  |
+| Transit network | `data/maps/osmnx_layers/IDF_transportation_network.graphml` | GraphML  | Multimodal combined graph                                     |
+| GTFS timetables | `data/maps/IDFM-gtfs/*.csv`                                 | GTFS CSV | IDF public transit schedules (IDFM)                           |
+| Amenities       | `data/maps/osmnx_layers/idf_amenities.csv`                  | CSV      | OSM amenity locations (shelters, schools, hospitals)          |
+| OSM raw         | `data/maps/osm_chunks_pyrosm/*.osm.pbf`                     | PBF      | Raw OSM extract for IDF (5 chunks)                            |
+| Config          | `simulation/configs/evacuation_simulation.json`             | JSON     | Scenario + behavioral parameters                              |
+| Summary config  | `simulation/configs/simulation_summary.json`                | JSON     | Aggregate run summary                                         |
+| Route cache     | `simulation/space/cache/*.json`                             | JSON     | Pre-computed geometries (21 files, speeds up spatial lookups) |
 
 ### Intermediate artifacts
 
-| Artifact | Location | Description |
-|---|---|---|
+| Artifact             | Location                  | Description                                             |
+|----------------------|---------------------------|---------------------------------------------------------|
 | Route geometry cache | `simulation/space/cache/` | Cached shortest-path geometries; populated on first run |
-| Network objects | In-memory (not persisted) | OSM GraphML loaded into NetworkX graph objects |
-| Agent population | In-memory (not persisted) | Mesa Agent objects, one per individual |
+| Network objects      | In-memory (not persisted) | OSM GraphML loaded into NetworkX graph objects          |
+| Agent population     | In-memory (not persisted) | Mesa Agent objects, one per individual                  |
 
 ### Outputs
 
-| Output | Path | Format | Description |
-|---|---|---|---|
-| Per-run info | `outputs/simulation_runs/evacuation_simulation_{i}/info.json` | JSON | Run metadata (timestamp, seed, agent count) |
-| Per-run params | `outputs/simulation_runs/evacuation_simulation_{i}/parameters_constants.json` | JSON | Exact parameters for that run |
-| Final agent states | `outputs/agent_states/final_agent_states.csv` | CSV | Agent state at end of simulation |
-| Fallback states | `outputs/agent_states/fallback_agent_states.csv` | CSV | Agents that triggered fallback routing logic |
-| Trial statistics | `outputs/agent_states/simulation_outcomes/Agents_Statistics_Trial.csv` | CSV | Aggregate per-trial statistics |
-| Enhanced summary | `outputs/agent_states/simulation_outcomes/Enhanced_Agent_Summary.csv` | CSV | Full per-agent summary with derived metrics |
-| Journey segments | `outputs/agent_states/simulation_outcomes/Journey_Segments_Detail.csv` | CSV | Per-segment journey breakdown (mode, distance, time) |
-| Figures | `outputs/figures/**/*.png` | PNG | All analysis plots (organized by sub-category) |
-| Interactive maps | `outputs/figures/evacuation_maps/*.html` | HTML | Folium maps with agent traces and SVI coloring |
+| Output             | Path                                                                          | Format | Description                                          |
+|--------------------|-------------------------------------------------------------------------------|--------|------------------------------------------------------|
+| Per-run info       | `outputs/simulation_runs/evacuation_simulation_{i}/info.json`                 | JSON   | Run metadata (timestamp, seed, agent count)          |
+| Per-run params     | `outputs/simulation_runs/evacuation_simulation_{i}/parameters_constants.json` | JSON   | Exact parameters for that run                        |
+| Final agent states | `outputs/agent_states/final_agent_states.csv`                                 | CSV    | Agent state at end of simulation                     |
+| Fallback states    | `outputs/agent_states/fallback_agent_states.csv`                              | CSV    | Agents that triggered fallback routing logic         |
+| Trial statistics   | `outputs/agent_states/simulation_outcomes/Agents_Statistics_Trial.csv`        | CSV    | Aggregate per-trial statistics                       |
+| Enhanced summary   | `outputs/agent_states/simulation_outcomes/Enhanced_Agent_Summary.csv`         | CSV    | Full per-agent summary with derived metrics          |
+| Journey segments   | `outputs/agent_states/simulation_outcomes/Journey_Segments_Detail.csv`        | CSV    | Per-segment journey breakdown (mode, distance, time) |
+| Figures            | `outputs/figures/**/*.png`                                                    | PNG    | All analysis plots (organized by sub-category)       |
+| Interactive maps   | `outputs/figures/evacuation_maps/*.html`                                      | HTML   | Folium maps with agent traces and SVI coloring       |
 
 ### Agent state schema (`final_agent_states.csv`)
 
-| Column | Type | Description |
-|---|---|---|
-| `agent_id` | str | Unique agent identifier |
-| `svi_score` | float [0,1] | Continuous SVI (higher = more vulnerable) |
-| `svi_quartile` | str | Low / Moderate / High / Very_High |
-| `primary_mode` | str | Walking / Bike / MPV / PT |
-| `final_status` | str | ARRIVED / EVACUATING / FAILED |
-| `evacuation_time_min` | float / NaN | Minutes to reach safe zone (NaN if not arrived) |
-| `distance_travelled_km` | float | Total network distance covered |
-| `destination_distance_km` | float | Great-circle distance to assigned destination |
-| `age` | int | Agent age |
-| `sex` | int | Encoded sex (0 = Man, 1 = Woman) |
-| `nb_car` | float | Number of cars in household (transformed) |
-| `pmr` | int | Reduced mobility indicator |
+| Column                    | Type        | Description                                     |
+|---------------------------|-------------|-------------------------------------------------|
+| `agent_id`                | str         | Unique agent identifier                         |
+| `svi_score`               | float [0,1] | Continuous SVI (higher = more vulnerable)       |
+| `svi_quartile`            | str         | Low / Moderate / High / Very_High               |
+| `primary_mode`            | str         | Walking / Bike / MPV / PT                       |
+| `final_status`            | str         | ARRIVED / EVACUATING / FAILED                   |
+| `evacuation_time_min`     | float / NaN | Minutes to reach safe zone (NaN if not arrived) |
+| `distance_travelled_km`   | float       | Total network distance covered                  |
+| `destination_distance_km` | float       | Great-circle distance to assigned destination   |
+| `age`                     | int         | Agent age                                       |
+| `sex`                     | int         | Encoded sex (0 = Man, 1 = Woman)                |
+| `nb_car`                  | float       | Number of cars in household (transformed)       |
+| `pmr`                     | int         | Reduced mobility indicator                      |
 
 Agent terminal states are defined as:
+
 - **ARRIVED**: agent reached a designated safe destination within the simulation horizon
 - **EVACUATING**: agent was actively traversing the network at simulation end (right-censored)
 - **FAILED**: agent could not find a feasible path or reroute to safety
@@ -203,17 +205,17 @@ Agent terminal states are defined as:
 
 ## Results Location
 
-| Result type | Directory |
-|---|---|
-| SVI distribution, CDF, Q-Q | `outputs/figures/svi_analysis/` |
-| Feature × SVI correlations | `outputs/figures/relationships_with_svi/` |
-| Nonlinear transform plots | `outputs/figures/relationships_with_transformations/` |
-| PCA / t-SNE validation | `outputs/figures/dimensionality_reduction/` |
-| SVI → behavioral param plots | `outputs/figures/behavioral_modeling/` |
-| Evacuation equity analytics | `outputs/figures/evacuation_analytics/` |
-| Agent trace maps (interactive) | `outputs/figures/evacuation_maps/` |
-| Aggregate run logs | `outputs/simulation_runs/` |
-| Agent-level CSV data | `outputs/agent_states/` |
+| Result type                    | Directory                                             |
+|--------------------------------|-------------------------------------------------------|
+| SVI distribution, CDF, Q-Q     | `outputs/figures/svi_analysis/`                       |
+| Feature × SVI correlations     | `outputs/figures/relationships_with_svi/`             |
+| Nonlinear transform plots      | `outputs/figures/relationships_with_transformations/` |
+| PCA / t-SNE validation         | `outputs/figures/dimensionality_reduction/`           |
+| SVI → behavioral param plots   | `outputs/figures/behavioral_modeling/`                |
+| Evacuation equity analytics    | `outputs/figures/evacuation_analytics/`               |
+| Agent trace maps (interactive) | `outputs/figures/evacuation_maps/`                    |
+| Aggregate run logs             | `outputs/simulation_runs/`                            |
+| Agent-level CSV data           | `outputs/agent_states/`                               |
 
 ---
 
@@ -276,12 +278,12 @@ it from the `run_analytics()` entry point.
 
 ## Module Reference
 
-| Module | Key responsibility |
-|---|---|
-| `preparing_resources.py` | Load OSM GraphML and GTFS; validate data completeness |
-| `space/evacuation_area_initializer.py` | Define evacuation zone polygon; assign agent destinations |
-| `space/pre_process_amenities.py` | Build geospatial index of shelters and safe destinations |
-| `model/agents_model_initializer.py` | Read config + SVI scores; instantiate Mesa Agent objects |
-| `model/evacuation_model.py` | Agent class: `__init__`, `step()`, routing, state transitions |
-| `model/simulation_analytics.py` | Post-simulation metrics, figure generation, CSV export |
-| `model/setup.py` | Package setup and optional compilation hooks |
+| Module                                 | Key responsibility                                            |
+|----------------------------------------|---------------------------------------------------------------|
+| `preparing_resources.py`               | Load OSM GraphML and GTFS; validate data completeness         |
+| `space/evacuation_area_initializer.py` | Define evacuation zone polygon; assign agent destinations     |
+| `space/pre_process_amenities.py`       | Build geospatial index of shelters and safe destinations      |
+| `model/agents_model_initializer.py`    | Read config + SVI scores; instantiate Mesa Agent objects      |
+| `model/evacuation_model.py`            | Agent class: `__init__`, `step()`, routing, state transitions |
+| `model/simulation_analytics.py`        | Post-simulation metrics, figure generation, CSV export        |
+| `model/setup.py`                       | Package setup and optional compilation hooks                  |
