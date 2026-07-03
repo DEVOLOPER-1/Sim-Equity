@@ -32,7 +32,7 @@ class Downloader:
     """
 
     # anchor maps_data dir next to this script, not relative to CWD
-    DATA_PATH = Path(__file__).parent / "maps_data"
+    DATA_PATH = Path(__file__).parent.parent / "data" / "maps"
     LOG_PATH = DATA_PATH / "downloads.log"
 
     def __init__(self):
@@ -125,7 +125,7 @@ class IleDeFranceMobilityDataCollector(Downloader):
     def ile_de_france_open_street_map_(self):
         """Extract and save OSM network maps_data for Île-de-France region."""
         place_name = "Île-de-France, France"
-        base_path = "./simulation/maps_data/osmnx_layers"
+        base_path = str(Path(__file__).parent.parent / "data" / "maps" / "osmnx_layers")
 
         # Ensure output directory exists
         Path(base_path).mkdir(parents=True, exist_ok=True)

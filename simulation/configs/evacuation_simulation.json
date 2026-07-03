@@ -1,0 +1,26 @@
+{
+  "info": {
+    "model_type": "EvacuationModel",
+    "time_stamp": "2025-09-07 03:32:34",
+    "agentpy_version": "0.1.5",
+    "python_version": "3.12.",
+    "experiment": false,
+    "completed": true,
+    "created_objects": 590,
+    "completed_steps": 180,
+    "run_time": "1:06:36.960250"
+  },
+  "parameters": {
+    "constants": {
+      "start_datetime": "2023-01-01T08:00:00",
+      "step_seconds": 60,
+      "svi_speed_penalty": 0.5,
+      "max_svi_start_delay_s": 1800,
+      "base_patience_s": 300,
+      "graphml_path_drive": "data/maps/osmnx_layers/IDF_drive_network.graphml",
+      "graphml_path_walk": "data/maps/osmnx_layers/IDF_walk_network.graphml",
+      "graphml_path_cycle": "data/maps/osmnx_layers/IDF_bike_network.graphml",
+      "amenities_df": "data/maps/osmnx_layers/idf_amenities.csv"
+    }
+  }
+}

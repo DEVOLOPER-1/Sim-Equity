@@ -1,0 +1,17 @@
+{
+  "simulation_metadata": {
+    "start_time": "2023-01-01T08:00:00",
+    "total_steps": 180,
+    "step_duration_seconds": 60,
+    "total_agents": 590,
+    "completion_time_seconds": 4008.689348936081
+  },
+  "agent_status_summary": {
+    "EVACUATING": 525,
+    "FAILED": 26,
+    "ARRIVED": 39
+  },
+  "failure_reasons": {
+    "Could not find any safe destination": 26
+  }
+}

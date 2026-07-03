@@ -1,6 +1,7 @@
 # FILE: simulation_analytics.py
 # -----------------------------
 import pathlib
+from pathlib import Path
 from collections import defaultdict
 from functools import wraps
 from typing import Any, Callable, Optional
@@ -166,7 +167,7 @@ class SimulationAnalytics:
 
     def _save_figure_default(self, fig, func_name: str, **save_kwargs):
         """Default figure saving method."""
-        out_dir = save_kwargs.get("folder", "plots")
+        out_dir = save_kwargs.get("folder", str(Path(__file__).parent.parent.parent / "outputs" / "figures"))
         pathlib.Path(out_dir).mkdir(parents=True, exist_ok=True)
         fname = save_kwargs.get("filename", f"{func_name}.png")
         dpi = save_kwargs.get("dpi", 300)
@@ -907,7 +908,7 @@ class SimulationAnalytics:
 
 def _save_figure_static(fig, func_name: str, **save_kwargs):
     """Static method for saving figures when not in class context."""
-    out_dir = save_kwargs.get("folder", "plots")
+    out_dir = save_kwargs.get("folder", str(Path(__file__).parent.parent.parent / "outputs" / "figures"))
     pathlib.Path(out_dir).mkdir(parents=True, exist_ok=True)
     fname = save_kwargs.get("filename", f"{func_name}.png")
     dpi = save_kwargs.get("dpi", 300)
