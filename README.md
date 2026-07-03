@@ -181,9 +181,9 @@ The aggregate results used in the paper are in
 independently.
 
 Interactive choropleth and evacuation trace maps are available locally at
-`outputs/figures/evacuation_maps/` and archived on
+`outputs/figures/evacuation_maps/` <!--and archived on
 [Zenodo (record 17074045)](https://zenodo.org/records/17074045) for easy
-browsing without local setup.
+browsing without local setup.-->
 
 > **Note on raw data:** The NetMob25 dataset is not redistributed here in
 > accordance with its data-use agreement. Researchers may request access at
@@ -201,7 +201,7 @@ dependency management.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/<your-org>/Sim-Equity.git
+git clone https://github.com/DEVOLOPER-1/Sim-Equity
 cd Sim-Equity
 
 # 2. Install with uv (recommended — uses uv.lock for exact versions)
