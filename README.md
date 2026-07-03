@@ -215,15 +215,14 @@ pip install -e .
 
 | Package                  | Role                                              |
 |--------------------------|---------------------------------------------------|
-| `mesa`                   | Agent-Based Modeling framework                    |
-| `osmnx`                  | OSM street network download and analysis          |
-| `networkx`               | Graph algorithms (Dijkstra shortest-path routing) |
-| `geopandas` / `pyrosm`   | Geospatial data I/O and processing                |
-| `scikit-learn`           | PCA for SVI construction                          |
-| `pandas` / `numpy`       | Tabular data processing                           |
-| `matplotlib` / `seaborn` | Static visualization                              |
-| `folium`                 | Interactive choropleth and trace maps             |
-| `pyproj`                 | Coordinate reference system transformations       |
+| `agentpy`                | Agent-Based Modeling (ABM) framework              |
+| `r5py`                   | Multi-modal routing engine (transit, bike, walk)  |
+| `osmnx`                  | OpenStreetMap network download and analysis       |
+| `geopandas` / `pyrosm`   | Geospatial data processing and OSM parsing        |
+| `scikit-learn`           | PCA and t-SNE for SVI and reduction analysis      |
+| `pandas` / `polars`      | High-performance tabular data processing          |
+| `matplotlib` / `seaborn` | Static data visualization and plotting            |
+| `folium`                 | Interactive map and agent trace generation        |
 
 ---
 
