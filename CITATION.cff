@@ -1,0 +1,73 @@
+cff-version: 1.2.0
+title: "SEEM: Simulation of Equitable Emergency Mobility"
+message: >-
+  If you use this software in your research, please cite both the software
+  and the accompanying publication using the metadata below.
+  For academic work, the preferred citation is the conference paper.
+type: software
+authors:
+  - family-names: Abdelhameid
+    given-names: Youssef M.
+    email: s-youssef.hameid@zewailcity.edu.eg
+    affiliation: >-
+      School of Computational Sciences & Artificial Intelligence,
+      University of Science & Technology, Zewail City
+  - family-names:  Eldin
+    given-names: Noha Gamal
+    email: ngamal@nu.edu.eg
+    affiliation: >-
+      Computer Science Program, School of Information Technology
+      and Computer Science, Nile University
+repository-code: "https://github.com/DEVOLOPER-1/SEEM"
+license: MIT
+keywords:
+  - agent-based modeling
+  - emergency evacuation
+  - equitable mobility
+  - social vulnerability index
+  - vulnerable populations
+  - disaster management
+  - transportation
+  - geospatial analysis
+  - simulation
+  - agentpy
+  - public transport
+  - urban resilience
+abstract: >-
+  SEEM is an agent-based simulation framework for studying equitable urban
+  mobility during city emergencies, with a particular focus on vulnerable
+  populations. The framework integrates a data-driven Social Vulnerability
+  Index (SVI), multi-modal transportation networks (driving, walking,
+  cycling, and public transport via GTFS), and SVI-driven behavioral
+  heuristics (reaction delay, speed penalty, rerouting patience) within
+  an AgentPy simulation. It quantifies the "Evacuation Equity Gap" —
+  the measurable difference in evacuation outcomes across vulnerability
+  groups — and demonstrates how pre-existing social inequalities translate
+  into life-or-death physical consequences during a crisis.
+version: "1.0.0"
+date-released: "2026-07-04"
+
+# -----------------------------------------------------------------------
+# Preferred citation: cite the conference paper for academic work.
+# Update url and doi fields once the proceedings DOI is assigned.
+# -----------------------------------------------------------------------
+preferred-citation:
+  type: conference-paper
+  title: >-
+    A Simulation Study on Equitable Mobility During City Emergencies,
+    Focusing on Vulnerable Groups
+  authors:
+    - family-names: Abdelhameid
+      given-names: Youssef M.
+      affiliation: >-
+        School of Computational Sciences & Artificial Intelligence,
+        University of Science & Technology, Zewail City
+    - family-names: Eldin
+      given-names: Noha Gamal
+      affiliation: >-
+        Computer Science Program, School of Information Technology
+        and Computer Science, Nile University
+  collection-title: "NetMob25 Data Challenge"
+  year: 2025
+  url: "https://netmob.org/www25/files/NetMob25_Book_of_Abstracts.pdf"
+  doi: "NETMOB25_DOI_PLACEHOLDER"  # TODO: replace with proceedings DOI if assigned
